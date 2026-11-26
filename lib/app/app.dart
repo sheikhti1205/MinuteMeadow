@@ -25,6 +25,9 @@ import 'branding.dart';
 import 'development_catalogue.dart';
 import 'installed_companion_view.dart';
 
+const _showDevelopmentTools =
+    kDebugMode || bool.fromEnvironment('COMPANION_FOCUS_DEVELOPMENT_TOOLS');
+
 class CompanionFocusApp extends ConsumerWidget {
   const CompanionFocusApp({super.key});
 
@@ -411,8 +414,8 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
               clearPacks: true,
             ),
             notificationsAvailable: TimerNotifications.available,
-            animationLab: kDebugMode ? (_) => const AnimationLabPage() : null,
-            developmentPacks: kDebugMode
+            animationLab: _showDevelopmentTools ? (_) => const AnimationLabPage() : null,
+            developmentPacks: _showDevelopmentTools
                 ? (_) => MarketplacePage(
                     initialSnapshot: _companion,
                     onSnapshot: _saveDevelopmentPacks,

@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      include_development_tools:
+        description: Include the Animation laboratory and geometric catalogue in the web artifact
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,7 +47,12 @@ jobs:
           48c950cd8e3bc3cddb34816c860e228be8832bef07a297c27e9907c057ff8162  drift_worker.js
           CHECKSUMS
           )
-      - run: flutter build web --no-web-resources-cdn
+      - name: Build the web app
+        env:
+          INCLUDE_DEVELOPMENT_TOOLS: ${{ inputs.include_development_tools == true }}
+        run: |
+          flutter build web --no-web-resources-cdn \
+            --dart-define=COMPANION_FOCUS_DEVELOPMENT_TOOLS="$INCLUDE_DEVELOPMENT_TOOLS"
       - name: Retain the web build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
