@@ -22,7 +22,10 @@ jobs:
         with:
           flutter-version: '3.44.0'
           channel: stable
-      - run: flutter create --empty --no-pub --platforms=android --org=app.companionfocus --project-name=companion_focus .
+      - name: Prepare Android runner
+        run: |
+          flutter create --empty --no-pub --platforms=android --org=app.companionfocus --project-name=companion_focus .
+          git show HEAD:pubspec.lock > pubspec.lock
       - run: flutter pub get --enforce-lockfile
       - name: Allow Android emulator access to KVM
         run: |
