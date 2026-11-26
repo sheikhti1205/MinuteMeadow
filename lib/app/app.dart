@@ -317,7 +317,10 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
     }
     final settings = _settings.value;
     if (!settings.notifications) return;
-    if (deadline == null && (previous == null || !previous.isAfter(DateTime.now()))) {
+    // Focus also sends null on completion; keep its already-due alert.
+    // Countdown sends null only when the user clears or changes the timer.
+    if (isFocus && deadline == null &&
+        (previous == null || !previous.isAfter(DateTime.now()))) {
       return;
     }
     if (deadline != null && previous != null &&

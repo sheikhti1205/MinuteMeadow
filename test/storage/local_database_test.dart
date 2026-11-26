@@ -1,13 +1,33 @@
 import 'dart:convert';
 
+import 'package:companion_focus/app/bootstrap.dart';
 import 'package:companion_focus/core/storage/data_backup.dart';
 import 'package:companion_focus/core/storage/local_database.dart';
 import 'package:companion_focus/core/storage/session_record.dart';
 import 'package:companion_focus/features/settings/app_settings.dart';
 import 'package:drift/native.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('unreadable settings do not hide saved session history', () async {
+    final database = LocalDatabase(NativeDatabase.memory());
+    addTearDown(database.close);
+    final container = ProviderContainer(
+      overrides: [databaseProvider.overrideWithValue(database)],
+    );
+    addTearDown(container.dispose);
+    const futureSettings = '{"schema":2}';
+    await database.writeState('settings', futureSettings);
+    await database.record(_session());
+
+    final startup = await container.read(startupProvider.future);
+
+    expect(startup.settings.focusMinutes, 25);
+    expect(startup.sessions.single.id, 'focus-1');
+    expect(await database.readState('settings'), futureSettings);
+  });
+
   test('focus finalization rolls back both writes if a transaction fails', () async {
     final database = LocalDatabase(NativeDatabase.memory());
     addTearDown(database.close);

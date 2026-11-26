@@ -25,9 +25,7 @@ final startupProvider = FutureProvider<StartupData>((ref) async {
   final nativeTime = hasCheckpoint ? await BootClock.sample() : null;
   final now = DateTime.now().toUtc();
   return StartupData(
-    settings: storedSettings == null
-        ? const AppSettings()
-        : AppSettings.decode(storedSettings),
+    settings: _restoreSettings(storedSettings),
     focus: focusCheckpoint?.snapshot ?? focus,
     clock: clockCheckpoint?.snapshot ?? clock,
     focusRecoveryNow: focusCheckpoint?.recoveryTime(now, nativeTime),
@@ -36,6 +34,15 @@ final startupProvider = FutureProvider<StartupData>((ref) async {
     sessions: await database.sessions(),
   );
 });
+
+AppSettings _restoreSettings(String? stored) {
+  if (stored == null) return const AppSettings();
+  try {
+    return AppSettings.decode(stored);
+  } on FormatException {
+    return const AppSettings();
+  }
+}
 
 class StartupData {
   const StartupData({
