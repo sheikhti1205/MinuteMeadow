@@ -113,5 +113,38 @@ void main() {
       expect(sample['head']?.rotationDegrees, closeTo(6, 0.0001));
       expect(sample['eye']?.frame?.x, GeometricRigFixture.eyeClosedRegion.x);
     });
+
+    test('scales elapsed time by playback speed', () {
+      final half = RigPlayback(
+        rig: GeometricRigFixture.buildRig(),
+        defaultClip: 'idle',
+        speed: 0.5,
+      );
+      half.advance(1000);
+      expect(half.timeOf('idle'), closeTo(500, 0.001));
+
+      final fast = RigPlayback(
+        rig: GeometricRigFixture.buildRig(),
+        defaultClip: 'idle',
+        speed: 2,
+      );
+      final events = fast.advance(1000);
+      expect(fast.timeOf('idle'), closeTo(400, 0.001));
+      expect(events.where((event) => event.looped), hasLength(1));
+
+      fast.speed = 0.25;
+      fast.advance(400);
+      expect(fast.timeOf('idle'), closeTo(500, 0.001));
+
+      expect(() => fast.speed = 0, throwsArgumentError);
+      expect(
+        () => RigPlayback(
+          rig: GeometricRigFixture.buildRig(),
+          defaultClip: 'idle',
+          speed: -1,
+        ),
+        throwsArgumentError,
+      );
+    });
   });
 }

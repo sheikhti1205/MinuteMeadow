@@ -110,12 +110,7 @@ class PackBundle {
     if (manifestBytes.length > PackLimits.manifestCharacters) {
       throw const FormatException('The pack manifest is too large.');
     }
-    final String text;
-    try {
-      text = utf8.decode(manifestBytes);
-    } on FormatException {
-      throw const FormatException('The pack manifest is not valid UTF-8.');
-    }
+    final text = _utf8(manifestBytes, 'The pack manifest is not valid UTF-8.');
     Object? json;
     try {
       json = jsonDecode(text);
@@ -123,6 +118,14 @@ class PackBundle {
       throw const FormatException('The pack manifest is not valid JSON.');
     }
     final manifest = PackManifest.fromJson(json);
+    final license = contents['LICENSE'] ?? contents['LICENSE.txt'];
+    if (license == null || license.isEmpty) {
+      throw const FormatException('The pack archive has no LICENSE file at its root.');
+    }
+    if (license.length > 64 * 1024) {
+      throw const FormatException('The pack license is too large.');
+    }
+    _utf8(license, 'The pack license is not valid UTF-8.');
     final declared = {for (final asset in manifest.assets) asset.path: asset};
     final provided = <String, Uint8List>{};
     for (final entry in contents.entries) {
@@ -153,14 +156,26 @@ class PackBundle {
         bytes[2] == 0x03 &&
         bytes[3] == 0x04;
     if (zipped) {
-      return fromArchive(PackArchive.read(bytes));
+      try {
+        return fromArchive(PackArchive.read(bytes));
+      } on FormatException {
+        rethrow;
+      } catch (_) {
+        throw const FormatException('The pack archive is damaged.');
+      }
     }
-    final String text;
-    try {
-      text = utf8.decode(bytes);
-    } on FormatException {
-      throw const FormatException('The pack file is neither a pack archive nor readable text.');
-    }
+    final text = _utf8(
+      bytes,
+      'The pack file is neither a pack archive nor readable text.',
+    );
     return decode(text);
+  }
+}
+
+String _utf8(Uint8List bytes, String complaint) {
+  try {
+    return utf8.decode(bytes);
+  } on FormatException {
+    throw FormatException(complaint);
   }
 }

@@ -5,13 +5,14 @@ import 'package:flutter/foundation.dart' as foundation;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
-import '../companion_engine/animation/rig_playback.dart';
+import '../companion_engine/animation/state_controller.dart';
 import '../companion_engine/render/affine2.dart';
 import '../companion_engine/render/atlas_cache.dart';
 import '../companion_engine/render/companion_pose.dart';
 import '../companion_engine/render/sprite_painter.dart';
 import '../companion_engine/rig/rig_model.dart';
 import '../companion_engine/scene/companion_scene.dart';
+import '../core/notifications/pack_audio.dart';
 import '../features/companion/companion_library.dart';
 import '../features/companion/pack_manifest.dart';
 
@@ -19,12 +20,14 @@ class InstalledCompanionView extends StatefulWidget {
   const InstalledCompanionView({
     required this.pack,
     required this.lowPower,
+    required this.sound,
     required this.ambientClip,
     super.key,
   });
 
   final InstalledPack pack;
   final bool lowPower;
+  final bool sound;
   final foundation.ValueListenable<String?> ambientClip;
 
   @override
@@ -40,8 +43,12 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
   bool _active = true;
   bool _reduceMotion = false;
   bool _ballInPlay = false;
+  final _interactionClock = Stopwatch()..start();
+  Duration? _lastPet;
+  Duration? _lastSound;
   String? _notice;
   String? _ambientClip;
+  bool _playedOneShotAmbient = false;
   int _loadRevision = 0;
 
   @override
@@ -82,6 +89,7 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
     widget.ambientClip.removeListener(_applyAmbientClip);
     _ticker.dispose();
     _stage?.dispose();
+    if (_lastSound != null) unawaited(PackAudio.stop());
     super.dispose();
   }
 
@@ -106,6 +114,7 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
         _notice = null;
         _ballInPlay = false;
         _ambientClip = null;
+        _playedOneShotAmbient = false;
       });
       previous?.dispose();
       _applyAmbientClip();
@@ -122,11 +131,12 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
     final previous = _ambientClip;
     final next = widget.ambientClip.value;
     if (previous == next) return;
-    if (previous != null) stage.playback.stop(previous);
-    _ambientClip = next;
-    if (next != null && stage.rig.clips.containsKey(next)) {
-      stage.playback.play(next);
+    if (previous != null && stage.animator.activeName == previous) {
+      stage.animator.cancelActive();
     }
+    _ambientClip = next;
+    _playedOneShotAmbient = false;
+    _startAmbientIfIdle(stage);
     stage.repaint();
     _syncTicker();
   }
@@ -159,15 +169,27 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
     _lastTick = elapsed;
     final delta = passed > stage.scene.maxStep ? stage.scene.maxStep : passed;
     stage.scene.advance(delta);
-    final clipCompleted = !_reduceMotion &&
-        stage.playback.advance(delta.inMicroseconds / 1000).any((event) => event.completed);
+    var clipCompleted = false;
+    if (!_reduceMotion) {
+      for (final event in stage.animator.advance(delta.inMicroseconds / 1000)) {
+        switch (event) {
+          case RigStateMarkerEvent(:final marker):
+            _playSound(marker.name);
+          case RigStateCompletionEvent():
+            clipCompleted = true;
+        }
+      }
+      if (clipCompleted) _startAmbientIfIdle(stage);
+    }
     var ballEnded = false;
     for (final event in stage.scene.takeEvents()) {
       if (event.type == CompanionSceneEventType.ballCaught) {
         _play(stage, 'catch');
+        _playSound('catch');
       } else if (event.type == CompanionSceneEventType.ballReturned ||
           event.type == CompanionSceneEventType.ballMissed) {
         ballEnded = true;
+        _playSound(event.type == CompanionSceneEventType.ballReturned ? 'ball_returned' : 'ball_missed');
         if (mounted) {
           setState(() {
             _ballInPlay = false;
@@ -178,25 +200,70 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
         }
       } else if (event.type == CompanionSceneEventType.pet) {
         _play(stage, 'pet');
+        _playSound('pet');
       }
     }
     stage.repaint();
-    if (ballEnded || clipCompleted) _syncTicker();
+    if (ballEnded || clipCompleted || !stage.hasAnimation) _syncTicker();
   }
 
   void _play(_CompanionStage stage, String clip) {
-    if (!_reduceMotion && stage.rig.clips.containsKey(clip)) {
-      stage.playback.play(clip);
+    if (_reduceMotion || stage.animator.activeName == clip ||
+        stage.animator.queuedRequests.any((request) => request.name == clip)) return;
+    for (final spec in widget.pack.manifest.clips) {
+      if (spec.id != clip) continue;
+      final state = spec.state;
+      stage.animator.request(
+        clip,
+        priority: state?.priority ?? (clip == 'catch' ? 10 : clip == 'pet' ? 5 : 0),
+        interruptible: state?.interruptible ?? true,
+        transition: state == null ? null : Duration(milliseconds: state.transitionMs),
+        markers: [
+          for (final marker in spec.events)
+            RigStateMarker(name: marker.id, timeMs: marker.timeMs),
+        ],
+      );
+      break;
+    }
+  }
+
+  void _startAmbientIfIdle(_CompanionStage stage) {
+    final clip = _ambientClip;
+    if (clip == null || _playedOneShotAmbient || stage.animator.hasActiveRequest) return;
+    _play(stage, clip);
+    if (stage.animator.activeName == clip && stage.rig.clipById(clip)?.loop == false) {
+      _playedOneShotAmbient = true;
+    }
+  }
+
+  void _playSound(String event) {
+    if (!widget.sound || !_active) return;
+    final pack = widget.pack;
+    for (final sound in pack.manifest.sounds) {
+      if (sound.event != event) continue;
+      final asset = pack.assets[sound.asset];
+      final now = _interactionClock.elapsed;
+      final last = _lastSound;
+      if (asset != null && (last == null || now - last >= const Duration(milliseconds: 180))) {
+        _lastSound = now;
+        unawaited(PackAudio.play(asset.bytes, sound.volume));
+      }
+      return;
     }
   }
 
   void _pet(Offset? point) {
     final stage = _stage;
+    final now = _interactionClock.elapsed;
+    final last = _lastPet;
+    if (last != null && now - last < const Duration(milliseconds: 220)) return;
     if (stage == null || !stage.scene.startPet(point ?? stage.scene.companionCenter)) {
       return;
     }
+    _lastPet = now;
     if (point == null || _reduceMotion) {
       _play(stage, 'pet');
+      _playSound('pet');
       stage.scene.takeEvents();
       stage.scene.endPet();
       stage.repaint();
@@ -217,6 +284,7 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
       _ballInPlay = true;
       _notice = 'Ball thrown';
     });
+    _playSound('ball_thrown');
     stage.repaint();
     _syncTicker();
   }
@@ -295,7 +363,7 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
 
 class _CompanionStage extends ChangeNotifier {
   _CompanionStage(this.rig, this.atlas)
-    : playback = RigPlayback(rig: rig),
+    : animator = RigStateController(rig),
       scene = CompanionScene(
         field: Size(
           math.max(144, rig.canvasWidth + 80).toDouble(),
@@ -306,16 +374,10 @@ class _CompanionStage extends ChangeNotifier {
 
   final CompanionRig rig;
   final AtlasCache atlas;
-  final RigPlayback playback;
+  final RigStateController animator;
   final CompanionScene scene;
 
-  bool get hasAnimation => rig.clips.values.any((clip) {
-    final position = playback.timeOf(clip.id);
-    return position != null &&
-        (clip.loop || position < clip.durationMs) &&
-        clip.layers.any((layer) =>
-            (layer.frames?.frames.length ?? 0) > 1 || layer.tracks.isNotEmpty);
-  });
+  bool get hasAnimation => animator.isAnimating || animator.hasBaseMotion;
 
   void repaint() => notifyListeners();
 
@@ -354,7 +416,7 @@ class _StagePainter extends CustomPainter {
     SpritePainter(
       pose: buildCompanionPose(
         stage.rig,
-        animations: stage.playback.sample(),
+        animations: stage.animator.sample(),
         rootTransform: root,
       ),
       atlas: stage.atlas,
@@ -396,21 +458,37 @@ CompanionRig _convertRig(InstalledPack pack) {
       rest.putIfAbsent(frame.layer, () => region);
       framesByLayer.putIfAbsent(frame.layer, () => []).add(region);
     }
-    final frameMs = (1000 / clip.fps).round();
-    final count = framesByLayer.values.fold<int>(1, (max, frames) => math.max(max, frames.length));
+    final tracksByLayer = <String, List<PropertyTrack>>{};
+    for (final track in clip.tracks) {
+      tracksByLayer.putIfAbsent(track.layer, () => []).add(PropertyTrack(
+        property: LayerProperty.values.byName(track.property.name),
+        keyframes: [
+          for (final frame in track.keyframes)
+            Keyframe(
+              timeMs: frame.timeMs,
+              value: frame.value,
+              easing: KeyframeEasing.values.byName(frame.easing.name),
+            ),
+        ],
+      ));
+    }
     clips[clip.id] = ClipDefinition(
       id: clip.id,
-      durationMs: frameMs * count,
+      durationMs: clip.timelineDurationMs,
       loop: clip.loop,
       layers: [
-        for (final entry in framesByLayer.entries)
+        for (final id in {...framesByLayer.keys, ...tracksByLayer.keys})
           LayerClip(
-            layerId: entry.key,
-            frames: FrameTrack(
-              frames: entry.value,
-              frameDurationMs: frameMs,
-              loop: clip.loop,
-            ),
+            layerId: id,
+            frames: switch (framesByLayer[id]) {
+              final frames? => FrameTrack(
+                frames: frames,
+                frameDurationMs: clip.frameDurationMs,
+                loop: clip.loop,
+              ),
+              null => null,
+            },
+            tracks: tracksByLayer[id] ?? const [],
           ),
       ],
     );
@@ -426,10 +504,23 @@ CompanionRig _convertRig(InstalledPack pack) {
           LayerDefinition(
             id: layer.id,
             defaultFrame: frame,
-            offset: Offset(
-              ((manifest.canvasWidth - frame.width) / 2).roundToDouble(),
-              (manifest.canvasHeight - frame.height).toDouble(),
-            ),
+            parent: layer.pose.parent,
+            offset: switch (layer.pose.offset) {
+              final point? => Offset(point.x, point.y),
+              null when layer.pose.parent != null => Offset.zero,
+              null => Offset(
+                ((manifest.canvasWidth - frame.width) / 2).roundToDouble(),
+                (manifest.canvasHeight - frame.height).toDouble(),
+              ),
+            },
+            pivot: switch (layer.pose.pivot) {
+              final point? => Offset(point.x, point.y),
+              null => Offset.zero,
+            },
+            rotationDegrees: layer.pose.rotationDegrees,
+            scale: Offset(layer.pose.scale.x, layer.pose.scale.y),
+            opacity: layer.pose.opacity,
+            visible: layer.pose.visible,
           ),
     ],
     clips: clips,

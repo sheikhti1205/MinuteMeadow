@@ -1,6 +1,6 @@
 # Marketplace architecture
 
-The marketplace starts with a bundled curated catalogue. A development build may load a separate catalogue of geometric test packs. An empty production catalogue is valid; browsing and the library remain available.
+The marketplace starts with a bundled curated catalogue. Debug builds expose a separate geometric catalogue in Settings under Development packs. An empty production catalogue is valid; browsing and the library remain available.
 
 The catalogue lists pack releases and availability. The library tracks what is installed on this device. An installed pack remains usable offline when catalogue loading fails. The app can compare a catalogue version with its installed counterpart to offer an update.
 

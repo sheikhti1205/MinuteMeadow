@@ -17,10 +17,12 @@ import '../features/clock/clock_page.dart';
 import '../features/companion/companion_page.dart';
 import '../features/focus/focus_page.dart';
 import '../features/insights/insights_page.dart';
+import '../features/marketplace/marketplace_page.dart';
 import '../features/settings/app_settings.dart';
 import '../features/settings/settings_page.dart';
 import 'bootstrap.dart';
 import 'branding.dart';
+import 'development_catalogue.dart';
 import 'installed_companion_view.dart';
 
 class CompanionFocusApp extends ConsumerWidget {
@@ -257,8 +259,14 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
   Future<void> _savePacks(int generation, String payload) => _write(() async {
     if (generation == _packGeneration) {
       await widget.database.writeState('companion', payload);
+      _companion = payload;
     }
   });
+
+  Future<void> _saveDevelopmentPacks(String payload) async {
+    await _savePacks(_packGeneration, payload);
+    if (mounted) setState(() => _packGeneration++);
+  }
 
   Future<void> _record(int generation, FocusOutcome outcome, String snapshot) =>
       _write(() async {
@@ -385,6 +393,7 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
               key: ValueKey((pack.id, pack.version)),
               pack: pack,
               lowPower: _settings.value.lowPower,
+              sound: _settings.value.sound,
               ambientClip: _companionClip,
             ),
           ),
@@ -400,6 +409,13 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
             ),
             notificationsAvailable: TimerNotifications.available,
             animationLab: kDebugMode ? (_) => const AnimationLabPage() : null,
+            developmentPacks: kDebugMode
+                ? (_) => MarketplacePage(
+                    initialSnapshot: _companion,
+                    onSnapshot: _saveDevelopmentPacks,
+                    repository: const DevelopmentCatalogueRepository(),
+                  )
+                : null,
           ),
         ),
         settings: settings,

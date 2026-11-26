@@ -1,21 +1,30 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:companion_focus/features/companion/companion_library.dart';
 import 'package:companion_focus/features/companion/pack_bundle.dart';
 import 'package:crypto/crypto.dart';
 
-/// Builds a small, valid RGBA PNG without any external codec dependency.
+/// Builds a small, real RGBA PNG.
+///
+/// The scanlines are compressed with the same zlib implementation the pack
+/// reader accepts, and every chunk carries its CRC.
 Uint8List buildPng({
   int width = 4,
   int height = 4,
   int red = 0x87,
   int green = 0x38,
   int blue = 0x29,
+  int colorType = 6,
+  int rowFilter = 0,
+  bool includeData = true,
+  List<int>? imageData,
+  List<MapEntry<String, List<int>>> extraChunks = const [],
 }) {
   final raw = BytesBuilder();
   for (var y = 0; y < height; y++) {
-    raw.addByte(0);
+    raw.addByte(rowFilter);
     for (var x = 0; x < width; x++) {
       raw.add(<int>[red, green, blue, 255]);
     }
@@ -24,13 +33,18 @@ Uint8List buildPng({
     ..add(_uint32(width))
     ..add(_uint32(height))
     ..addByte(8)
-    ..addByte(6)
+    ..addByte(colorType)
     ..addByte(0)
     ..addByte(0)
     ..addByte(0);
   final out = BytesBuilder()..add(const <int>[137, 80, 78, 71, 13, 10, 26, 10]);
   out.add(_chunk('IHDR', header.takeBytes()));
-  out.add(_chunk('IDAT', _zlibStored(raw.takeBytes())));
+  for (final extra in extraChunks) {
+    out.add(_chunk(extra.key, extra.value));
+  }
+  if (includeData) {
+    out.add(_chunk('IDAT', imageData ?? _zlib(raw.takeBytes())));
+  }
   out.add(_chunk('IEND', const <int>[]));
   return out.takeBytes();
 }
@@ -77,10 +91,10 @@ Map<String, Object?> manifestFor(
     if (minimumAppVersion != null) 'application': {'minVersion': minimumAppVersion},
     'canvas': canvas ?? {'width': 32, 'height': 32},
     'palette': palette,
-    'layers': layers ?? [
+    'layers': layers ?? <Map<String, Object?>>[
       {'id': 'body', 'z': 0},
     ],
-    'clips': clips ?? [
+    'clips': clips ?? <Map<String, Object?>>[
       {
         'id': 'idle',
         'fps': 8,
@@ -183,35 +197,8 @@ Uint8List _chunk(String type, List<int> data) {
   return out.takeBytes();
 }
 
-Uint8List _zlibStored(Uint8List data) {
-  final out = BytesBuilder()..add(const <int>[0x78, 0x01]);
-  if (data.isEmpty) {
-    out.add(const <int>[1, 0, 0, 0xFF, 0xFF]);
-  }
-  var offset = 0;
-  while (offset < data.length) {
-    final size = data.length - offset > 65535 ? 65535 : data.length - offset;
-    out.addByte(offset + size == data.length ? 1 : 0);
-    out.addByte(size & 0xFF);
-    out.addByte((size >> 8) & 0xFF);
-    out.addByte(~size & 0xFF);
-    out.addByte((~size >> 8) & 0xFF);
-    out.add(Uint8List.sublistView(data, offset, offset + size));
-    offset += size;
-  }
-  out.add(_uint32(_adler32(data)));
-  return out.takeBytes();
-}
-
-int _adler32(Uint8List data) {
-  var a = 1;
-  var b = 0;
-  for (final byte in data) {
-    a = (a + byte) % 65521;
-    b = (b + a) % 65521;
-  }
-  return (b << 16) | a;
-}
+Uint8List _zlib(Uint8List data) =>
+    Uint8List.fromList(ZLibEncoder().encode(data));
 
 Uint8List _uint32(int value) => Uint8List.fromList(<int>[
   (value >> 24) & 0xFF,

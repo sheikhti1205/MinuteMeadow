@@ -78,7 +78,10 @@ void main() {
       events.indexOf(CompanionSceneEventType.ballCaught),
       lessThan(events.indexOf(CompanionSceneEventType.ballReturned)),
     );
-    expect(events.where((type) => type == CompanionSceneEventType.ballBounced), isNotEmpty);
+    expect(
+      events.where((type) => type == CompanionSceneEventType.ballBounced),
+      isNotEmpty,
+    );
     expect(scene.ballPhase, BallPhase.none);
     expect(scene.motion, CompanionMotion.idle);
     expect(scene.companionTopLeft, scene.home);
@@ -121,9 +124,10 @@ void main() {
     scene.throwBall();
     final quad = scene.ballQuad(GeometricRigFixture.ballRegion);
     expect(quad, isNotNull);
-    expect(quad!.region, GeometricRigFixture.ballRegion);
+    final placed = quad!;
+    expect(placed.region, GeometricRigFixture.ballRegion);
     expect(
-      quad.bounds.center,
+      placed.bounds.center,
       offsetMoreOrLessEquals(scene.ballPosition, epsilon: 0.0001),
     );
   });

@@ -385,21 +385,33 @@ class _ActivityChart extends StatelessWidget {
       container: true,
       label: _semanticsLabel(localizations),
       excludeSemantics: true,
-      child: SizedBox(
-        height: _height,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (final day in days)
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 3),
-                  child: _ActivityBar(day: day, maxFocused: maxFocused),
+      child: LayoutBuilder(builder: (context, constraints) {
+        final labelSize = Theme.of(context).textTheme.labelSmall?.fontSize ?? 11;
+        final minimumBarWidth = MediaQuery.textScalerOf(context).scale(labelSize) * 3 + 6;
+        if (constraints.maxWidth < minimumBarWidth * days.length) {
+          return Column(
+            children: [
+              for (final day in days)
+                _WideActivityBar(day: day, maxFocused: maxFocused),
+            ],
+          );
+        }
+        return SizedBox(
+          height: _height,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (final day in days)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 3),
+                    child: _ActivityBar(day: day, maxFocused: maxFocused),
+                  ),
                 ),
-              ),
-          ],
-        ),
-      ),
+            ],
+          ),
+        );
+      }),
     );
   }
 
@@ -485,10 +497,53 @@ class _ActivityBar extends StatelessWidget {
   }
 }
 
-class _ActivityBarFill extends StatelessWidget {
-  const _ActivityBarFill({required this.day});
+class _WideActivityBar extends StatelessWidget {
+  const _WideActivityBar({required this.day, required this.maxFocused});
 
   final DayActivity day;
+  final int maxFocused;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final focused = day.totals.focused.inMilliseconds;
+    final fraction = maxFocused == 0 ? 0.0 : focused / maxFocused;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            spacing: 8,
+            children: [
+              Text(_weekdayLabels[day.day.weekday - 1], style: theme.textTheme.labelSmall),
+              Text(_durationLabel(day.totals.focused), style: theme.textTheme.labelSmall),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Container(
+            height: 6,
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.07),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FractionallySizedBox(
+                widthFactor: fraction,
+                heightFactor: 1,
+                child: _ActivityBarFill(day: day, direction: Axis.horizontal),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActivityBarFill extends StatelessWidget {
+  const _ActivityBarFill({required this.day, this.direction = Axis.vertical});
+
+  final DayActivity day;
+  final Axis direction;
 
   @override
   Widget build(BuildContext context) {
@@ -498,7 +553,8 @@ class _ActivityBarFill extends StatelessWidget {
     if (completed == 0 && uncompleted == 0) {
       return const SizedBox.shrink();
     }
-    return Column(
+    return Flex(
+      direction: direction,
       children: [
         if (uncompleted > 0)
           Expanded(
@@ -553,10 +609,12 @@ class _LegendItem extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 6),
-        Text(
-          label,
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
+        Flexible(
+          child: Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ),
       ],
@@ -581,10 +639,12 @@ class _HistoryHeader extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 12),
-        Text(
-          _countLabel(count),
-          style: theme.textTheme.labelMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
+        Flexible(
+          child: Text(
+            _countLabel(count),
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ),
       ],

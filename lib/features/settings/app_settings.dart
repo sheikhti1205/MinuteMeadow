@@ -2,11 +2,13 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../../core/time/timer_defaults.dart';
+
 class AppSettings {
   const AppSettings({
-    this.focusMinutes = 25,
-    this.shortBreakMinutes = 5,
-    this.longBreakMinutes = 15,
+    this.focusMinutes = TimerDefaults.focusMinutes,
+    this.shortBreakMinutes = TimerDefaults.shortBreakMinutes,
+    this.longBreakMinutes = TimerDefaults.longBreakMinutes,
     this.themeMode = ThemeMode.system,
     this.notifications = false,
     this.sound = true,

@@ -5,18 +5,21 @@ import '../render/affine2.dart';
 import '../render/companion_pose.dart';
 import '../render/debug_geometry.dart';
 import '../rig/rig_model.dart';
+import 'companion_move.dart';
 
-enum CompanionMotion { idle, petting, chasing, returning }
+enum CompanionMotion { idle, petting, chasing, returning, walking, running, jumping }
 
-enum BallPhase { none, flying, chasing, returning }
+enum BallPhase { none, flying, rolling, chasing, returning }
 
 enum CompanionSceneEventType {
   pet,
   ballThrown,
   ballBounced,
+  ballRolling,
   ballCaught,
   ballReturned,
   ballMissed,
+  movementCompleted,
 }
 
 final class CompanionSceneEvent {
@@ -87,6 +90,10 @@ final class CompanionScene {
   double _chaseElapsedSeconds = 0;
 
   final List<CompanionSceneEvent> _events = <CompanionSceneEvent>[];
+  List<CompanionMove> _route = const [];
+  int _routeIndex = 0;
+  late Offset _moveFrom;
+  double _moveElapsed = 0;
 
   double get nowMs => _nowMs;
 
@@ -101,6 +108,7 @@ final class CompanionScene {
   double get facing => _facing;
   CompanionMotion get motion => _motion;
   bool get isPetting => _petting;
+  bool get isMoving => _route.isNotEmpty;
   int get petCount => _petCount;
 
   BallPhase get ballPhase => _ballPhase;
@@ -139,7 +147,7 @@ final class CompanionScene {
   /// Starts or continues a petting stroke. Returns false when the scene is busy
   /// with the ball or when the point misses the companion.
   bool startPet(Offset point) {
-    if (_ballPhase != BallPhase.none) return false;
+    if (_ballPhase != BallPhase.none || isMoving) return false;
     if (_motion == CompanionMotion.chasing ||
         _motion == CompanionMotion.returning) {
       return false;
@@ -170,6 +178,7 @@ final class CompanionScene {
   bool throwBall({Offset? target}) {
     if (_ballPhase != BallPhase.none) return false;
     endPet();
+    _route = const [];
     final groundCenter = _ground - ballRadius;
     final start = Offset(
       (companionCenter.dx + _facing * 10)
@@ -208,13 +217,16 @@ final class CompanionScene {
     final seconds = delta.inMicroseconds / Duration.microsecondsPerSecond;
     if (seconds <= 0) return;
     final step = math.min(seconds, maxStep.inMicroseconds / 1e6);
-    _nowMs += step * 1000;
+    _nowMs += seconds * 1000;
     _advancePetting();
     switch (_ballPhase) {
       case BallPhase.none:
+        _advanceRoute(step);
         break;
       case BallPhase.flying:
         _advanceFlying(step);
+      case BallPhase.rolling:
+        _advanceRolling(step);
       case BallPhase.chasing:
         _advanceChasing(step);
       case BallPhase.returning:
@@ -233,8 +245,94 @@ final class CompanionScene {
     _chaseElapsedSeconds = 0;
     _motion = CompanionMotion.idle;
     _nextPetAtMs = 0;
+    _route = const [];
     _events.clear();
   }
+
+  bool walkTo(Offset target) => _travel(target, CompanionGait.walk, walkSpeed);
+
+  bool runTo(Offset target) => _travel(target, CompanionGait.run, walkSpeed * 1.8);
+
+  bool jumpTo(Offset target, {double height = 24}) => playRoute([
+    CompanionMove(
+      target: target,
+      duration: const Duration(milliseconds: 420),
+      gait: CompanionGait.jump,
+      jumpHeight: height,
+    ),
+  ]);
+
+  bool _travel(Offset target, CompanionGait gait, double speed) {
+    if (!target.isFinite) return false;
+    final distance = (_bound(target) - _position).distance;
+    return playRoute([
+      CompanionMove(
+        target: target,
+        duration: Duration(milliseconds: math.max(1, (distance / speed * 1000).round())),
+        gait: gait,
+      ),
+    ]);
+  }
+
+  bool playRoute(List<CompanionMove> moves) {
+    if (_ballPhase != BallPhase.none || moves.isEmpty || moves.length > 32 ||
+        moves.any((move) => !move.target.isFinite || move.duration <= Duration.zero ||
+            move.duration > const Duration(seconds: 10) ||
+            !move.jumpHeight.isFinite || move.jumpHeight < 0 || move.jumpHeight > field.height)) {
+      return false;
+    }
+    endPet();
+    _route = List.unmodifiable(moves);
+    _routeIndex = 0;
+    _startMove();
+    return true;
+  }
+
+  void _startMove() {
+    _moveFrom = _position;
+    _moveElapsed = 0;
+    final move = _route[_routeIndex];
+    final dx = _bound(move.target).dx - _position.dx;
+    if (dx != 0) _facing = dx.sign;
+    _motion = switch (move.gait) {
+      CompanionGait.walk => CompanionMotion.walking,
+      CompanionGait.run => CompanionMotion.running,
+      CompanionGait.jump => CompanionMotion.jumping,
+    };
+  }
+
+  void _advanceRoute(double seconds) {
+    while (_route.isNotEmpty && seconds > 0) {
+      final move = _route[_routeIndex];
+      final duration = move.duration.inMicroseconds / Duration.microsecondsPerSecond;
+      final left = duration - _moveElapsed;
+      final used = math.min(seconds, left);
+      _moveElapsed += used;
+      seconds -= used;
+      final progress = _moveElapsed / duration;
+      final target = _bound(move.target);
+      final position = Offset.lerp(_moveFrom, target, progress)!;
+      final height = move.gait == CompanionGait.jump
+          ? 4 * move.jumpHeight * progress * (1 - progress)
+          : 0.0;
+      _position = Offset(position.dx, math.max(0.0, position.dy - height));
+      if (used < left) return;
+      _position = target;
+      _routeIndex++;
+      if (_routeIndex == _route.length) {
+        _route = const [];
+        _motion = CompanionMotion.idle;
+        _emit(CompanionSceneEventType.movementCompleted);
+      } else {
+        _startMove();
+      }
+    }
+  }
+
+  Offset _bound(Offset point) => Offset(
+    point.dx.clamp(0.0, math.max(0, field.width - companionSize.width)).toDouble(),
+    point.dy.clamp(0.0, math.max(0, _ground - companionSize.height)).toDouble(),
+  );
 
   /// The ball sprite over the scene, or null when the ball is put away.
   CompanionQuad? ballQuad(SpriteRegion region) {
@@ -255,10 +353,10 @@ final class CompanionScene {
     if (!_petting) return;
     final intervalMs = petInterval.inMicroseconds / 1000;
     if (intervalMs <= 0) return;
-    while (_nowMs >= _nextPetAtMs) {
+    if (_nowMs >= _nextPetAtMs) {
       _petCount += 1;
       _emit(CompanionSceneEventType.pet);
-      _nextPetAtMs += intervalMs;
+      _nextPetAtMs = _nowMs + intervalMs;
     }
   }
 
@@ -285,15 +383,30 @@ final class CompanionScene {
       _bounces += 1;
       _emit(CompanionSceneEventType.ballBounced);
       if (_bounces >= maxBounces || velocity.dy.abs() < 40) {
-        _ballPhase = BallPhase.chasing;
+        _ballPhase = BallPhase.rolling;
         _motion = CompanionMotion.chasing;
         _chaseElapsedSeconds = 0;
-        velocity = Offset.zero;
+        velocity = Offset(velocity.dx, 0);
+        _emit(CompanionSceneEventType.ballRolling);
       }
     }
 
     _ball = position;
     _ballVelocity = velocity;
+  }
+
+  void _advanceRolling(double seconds) {
+    final speed = _ballVelocity.dx;
+    final nextSpeed = math.max(0.0, speed.abs() - 180 * seconds) * speed.sign;
+    final nextX = _ball.dx + (speed + nextSpeed) * seconds / 2;
+    final bounded = nextX.clamp(ballRadius, field.width - ballRadius).toDouble();
+    _ball = Offset(bounded, _ground - ballRadius);
+    if (nextSpeed == 0 || nextX != bounded) {
+      _ballVelocity = Offset.zero;
+      _ballPhase = BallPhase.chasing;
+    } else {
+      _ballVelocity = Offset(nextSpeed, 0);
+    }
   }
 
   void _advanceChasing(double seconds) {

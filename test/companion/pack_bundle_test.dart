@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:companion_focus/features/companion/pack_bundle.dart';
 import 'package:companion_focus/features/companion/pack_manifest.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -140,12 +141,34 @@ void main() {
         utf8.encode(jsonEncode(manifestFor(files))),
       ),
       'preview.png': files['preview.png']!,
+      'LICENSE': Uint8List.fromList(utf8.encode('CC-BY-4.0')),
       'notes.txt': Uint8List.fromList(utf8.encode('hello')),
     };
 
     expect(
       () => PackBundle.fromArchive(contents),
       throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('requires a license file in an archive', () {
+    final files = fixtureFiles();
+    final contents = <String, Uint8List>{
+      'manifest.json': Uint8List.fromList(
+        utf8.encode(jsonEncode(manifestFor(files))),
+      ),
+      'preview.png': files['preview.png']!,
+    };
+
+    expect(
+      () => PackBundle.fromArchive(contents),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('LICENSE'),
+        ),
+      ),
     );
   });
 
@@ -163,6 +186,48 @@ void main() {
         Uint8List.fromList(<int>[0x50, 0x4B, 0x03, 0x04, 0, 0, 0, 0]),
       ),
       throwsA(isA<FormatException>()),
+    );
+  });
+
+  Uint8List zipOf(Map<String, List<int>> entries) {
+    final archive = Archive();
+    for (final entry in entries.entries) {
+      archive.addFile(ArchiveFile.bytes(entry.key, entry.value));
+    }
+    return Uint8List.fromList(ZipEncoder().encode(archive));
+  }
+
+  test('reads a real packaged zip through the archive reader', () {
+    final files = fixtureFiles();
+    final bytes = zipOf(<String, List<int>>{
+      'manifest.json': utf8.encode(jsonEncode(manifestFor(files))),
+      'preview.png': files['preview.png']!,
+      'LICENSE': utf8.encode('CC-BY-4.0'),
+    });
+
+    final bundle = PackBundle.fromUpload(bytes);
+
+    expect(bundle.manifest.id, 'dev.example.geometric');
+    expect(bundle.assets.keys, ['preview.png']);
+    expect(bundle.assets['preview.png']!.width, 4);
+  });
+
+  test('refuses a packaged zip without a license file', () {
+    final files = fixtureFiles();
+    final bytes = zipOf(<String, List<int>>{
+      'manifest.json': utf8.encode(jsonEncode(manifestFor(files))),
+      'preview.png': files['preview.png']!,
+    });
+
+    expect(
+      () => PackBundle.fromUpload(bytes),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('LICENSE'),
+        ),
+      ),
     );
   });
 }

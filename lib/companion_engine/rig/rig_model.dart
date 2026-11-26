@@ -102,6 +102,7 @@ final class PropertyTrack {
       final next = frames[index];
       if (timeMs <= next.timeMs) {
         final previous = frames[index - 1];
+        if (timeMs == next.timeMs) return next.value;
         if (previous.easing == KeyframeEasing.step) return previous.value;
         final span = next.timeMs - previous.timeMs;
         final progress = span == 0 ? 1.0 : (timeMs - previous.timeMs) / span;

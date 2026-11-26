@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../../core/time/timer_defaults.dart';
+
 /// The kind of timer a focus page session belongs to.
 enum FocusPhase {
   focus('Focus'),
@@ -23,9 +25,9 @@ enum FocusPhase {
 /// that owns them; the engine refuses to start a non-positive duration.
 class FocusSettings {
   const FocusSettings({
-    this.focusMinutes = 25,
-    this.shortBreakMinutes = 5,
-    this.longBreakMinutes = 15,
+    this.focusMinutes = TimerDefaults.focusMinutes,
+    this.shortBreakMinutes = TimerDefaults.shortBreakMinutes,
+    this.longBreakMinutes = TimerDefaults.longBreakMinutes,
   });
 
   static const defaults = FocusSettings();
@@ -45,6 +47,26 @@ class FocusSettings {
     shortBreakMinutes: shortBreakMinutes ?? this.shortBreakMinutes,
     longBreakMinutes: longBreakMinutes ?? this.longBreakMinutes,
   );
+}
+
+enum FocusPreset {
+  defaults('Default', null),
+  sprint('Sprint', FocusSettings(focusMinutes: 15, shortBreakMinutes: 3, longBreakMinutes: 10)),
+  deepWork('Deep work', FocusSettings(focusMinutes: 50, shortBreakMinutes: 10, longBreakMinutes: 20));
+
+  const FocusPreset(this.label, this.fixedSettings);
+
+  final String label;
+  final FocusSettings? fixedSettings;
+
+  FocusSettings settings(FocusSettings defaults) => fixedSettings ?? defaults;
+
+  static FocusPreset? tryRead(Object? value) {
+    for (final preset in values) {
+      if (value == preset.name) return preset;
+    }
+    return null;
+  }
 }
 
 /// The explicit states the page can show.
@@ -82,6 +104,7 @@ class FocusSnapshot {
     required this.remaining,
     required this.finishedAt,
     required this.completedFocusSessions,
+    this.preset,
   });
 
   static const _version = 1;
@@ -97,8 +120,9 @@ class FocusSnapshot {
   final Duration? remaining;
   final DateTime? finishedAt;
   final int completedFocusSessions;
+  final FocusPreset? preset;
 
-  String encode() => jsonEncode(<String, Object?>{
+  String encode({FocusPreset? selectedPreset}) => jsonEncode(<String, Object?>{
     'version': _version,
     'id': id,
     'phase': phase.name,
@@ -109,6 +133,7 @@ class FocusSnapshot {
     'remainingMs': remaining?.inMilliseconds,
     'finishedAt': finishedAt?.millisecondsSinceEpoch,
     'completedFocusSessions': completedFocusSessions,
+    if ((selectedPreset ?? preset) case final active?) 'preset': active.name,
   });
 
   static FocusSnapshot? tryDecode(String? source) {
@@ -172,6 +197,7 @@ class FocusSnapshot {
       remaining: remaining,
       finishedAt: finishedAt,
       completedFocusSessions: completedCount,
+      preset: FocusPreset.tryRead(decoded['preset']),
     );
   }
 
@@ -291,7 +317,7 @@ class FocusEngine {
 
   /// A long break follows every fourth completed focus session.
   FocusPhase get nextBreakPhase {
-    final inCycle = _completedFocusSessions % 4;
+    final inCycle = _completedFocusSessions % TimerDefaults.sessionsPerCycle;
     return _completedFocusSessions > 0 && inCycle == 0
         ? FocusPhase.longBreak
         : FocusPhase.shortBreak;

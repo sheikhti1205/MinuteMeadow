@@ -57,6 +57,31 @@ String _runningSnapshot({Duration ago = Duration.zero, int count = 0}) {
 }
 
 void main() {
+  testWidgets('selects a focus preset and restores it from the saved snapshot', (tester) async {
+    final settings = ValueNotifier(const FocusSettings());
+    addTearDown(settings.dispose);
+    String? saved;
+    Widget host({String? initial}) => _host(
+      settings: settings,
+      snapshot: initial,
+      onOutcome: (_, _) async {},
+      onSnapshot: (snapshot) async {
+        saved = snapshot;
+      },
+    );
+    await tester.pumpWidget(host());
+    await tester.tap(find.text('Deep work'));
+    await tester.pump();
+    expect(find.text('50:00'), findsOneWidget);
+    expect(FocusSnapshot.tryDecode(saved)?.preset, FocusPreset.deepWork);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(host(initial: saved));
+    expect(find.text('50:00'), findsOneWidget);
+    expect(tester.widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Deep work')).selected, isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('shows the ready state with one primary action', (tester) async {
     final settings = ValueNotifier(const FocusSettings());
     addTearDown(settings.dispose);

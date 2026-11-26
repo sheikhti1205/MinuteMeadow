@@ -5,6 +5,7 @@ export 'render/companion_pose.dart';
 export 'render/debug_geometry.dart';
 export 'render/sprite_painter.dart';
 export 'rig/rig_codec.dart';
+export 'rig/manifest_inspection.dart';
 export 'rig/rig_model.dart';
 export 'rig/rig_validator.dart';
 export 'scene/companion_scene.dart';

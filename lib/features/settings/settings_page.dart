@@ -14,6 +14,7 @@ class SettingsPage extends StatefulWidget {
     required this.onClear,
     this.notificationsAvailable = false,
     this.animationLab,
+    this.developmentPacks,
     super.key,
   });
 
@@ -24,6 +25,7 @@ class SettingsPage extends StatefulWidget {
   final Future<void> Function() onClear;
   final bool notificationsAvailable;
   final WidgetBuilder? animationLab;
+  final WidgetBuilder? developmentPacks;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -180,7 +182,8 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
             SwitchListTile(
-              title: const Text('Completion sound'),
+              title: const Text('Sound'),
+              subtitle: const Text('Timer completion and companion interactions.'),
               value: settings.sound,
               onChanged: _busy ? null : (value) => _run(
                 () => widget.onSave(settings.copyWith(sound: value)),
@@ -241,6 +244,13 @@ class _SettingsPageState extends State<SettingsPage> {
                 title: const Text('Animation laboratory'),
                 onTap: () => Navigator.of(context).push<void>(
                   MaterialPageRoute(builder: animationLab),
+                ),
+              ),
+            if (widget.developmentPacks case final developmentPacks?)
+              ListTile(
+                title: const Text('Development packs'),
+                onTap: () => Navigator.of(context).push<void>(
+                  MaterialPageRoute(builder: developmentPacks),
                 ),
               ),
           ],

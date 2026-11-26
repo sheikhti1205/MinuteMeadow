@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
+
 import 'pack_manifest.dart';
 
 /// The declared geometry of a pack image.
@@ -11,12 +13,19 @@ class PngInfo {
   final int colorType;
 }
 
-/// Validates a PNG container without decoding pixels.
+/// Chunks a pack image may not use.
 ///
-/// It checks the signature, walks every chunk, verifies each chunk CRC, reads
-/// the header geometry and requires the image to end with a single IEND chunk
-/// and no trailing bytes. Image pixels are decoded later by the render surface,
-/// which must treat a decode failure as a missing image.
+/// APNG chunks would make the renderer animate outside the declared clips, and
+/// the compressed ancillary chunks carry an unbounded secondary stream that the
+/// manifest does not describe.
+const _unsupportedChunks = <String>{'acTL', 'fcTL', 'fdAT', 'zTXt', 'iTXt', 'iCCP'};
+
+/// Validates a PNG container and its pixel stream without rendering it.
+///
+/// The signature is checked, every chunk CRC is verified, the header geometry is
+/// bounded, image data must be present and contiguous, and the zlib stream is
+/// inflated with an exact output limit so a decompression bomb is refused before
+/// the renderer sees the asset. Unsupported chunks fail the pack.
 PngInfo inspectPng(Uint8List bytes, String name) {
   if (bytes.length < 45) {
     throw FormatException('$name is not a PNG image.');
@@ -32,6 +41,11 @@ PngInfo inspectPng(Uint8List bytes, String name) {
   var height = 0;
   var colorType = 0;
   var hasHeader = false;
+  var hasPalette = false;
+  var hasData = false;
+  var dataClosed = false;
+  var sawEnd = false;
+  final imageData = BytesBuilder();
   var offset = 8;
 
   while (offset < bytes.length) {
@@ -55,6 +69,7 @@ PngInfo inspectPng(Uint8List bytes, String name) {
       throw FormatException('$name has a damaged PNG block.');
     }
     final type = String.fromCharCodes(bytes, typeStart, typeStart + 4);
+
     if (!hasHeader) {
       if (type != 'IHDR' || length != 13) {
         throw FormatException('$name has no PNG header.');
@@ -81,15 +96,40 @@ PngInfo inspectPng(Uint8List bytes, String name) {
         throw FormatException('$name must be between 1 and ${PackLimits.maxImage} pixels.');
       }
       hasHeader = true;
-    } else if (type == 'IHDR') {
-      throw FormatException('$name has a repeated PNG header.');
+      offset = dataStart + length + 4;
+      continue;
     }
+
     if (type == 'IEND') {
       if (length != 0) {
         throw FormatException('$name has an invalid PNG trailer.');
       }
+      sawEnd = true;
       offset = dataStart + 4;
       break;
+    }
+    if (_unsupportedChunks.contains(type)) {
+      throw FormatException('$name uses an unsupported $type block.');
+    }
+    if (type == 'IHDR') {
+      throw FormatException('$name has a repeated PNG header.');
+    }
+    if (type == 'PLTE') {
+      if (hasData) {
+        throw FormatException('$name has a palette after its image data.');
+      }
+      if (length < 3 || length > 768 || length % 3 != 0) {
+        throw FormatException('$name has an invalid PNG palette.');
+      }
+      hasPalette = true;
+    } else if (type == 'IDAT') {
+      if (dataClosed) {
+        throw FormatException('$name has non-consecutive image data.');
+      }
+      hasData = true;
+      imageData.add(Uint8List.sublistView(bytes, dataStart, dataStart + length));
+    } else if (hasData) {
+      dataClosed = true;
     }
     offset = dataStart + length + 4;
   }
@@ -97,10 +137,59 @@ PngInfo inspectPng(Uint8List bytes, String name) {
   if (!hasHeader) {
     throw FormatException('$name has no PNG header.');
   }
+  if (!sawEnd) {
+    throw FormatException('$name has no PNG trailer.');
+  }
   if (offset != bytes.length) {
     throw FormatException('$name has trailing data.');
   }
+  if (!hasData) {
+    throw FormatException('$name has no image data.');
+  }
+  if (colorType == 3 && !hasPalette) {
+    throw FormatException('$name is indexed without a palette.');
+  }
+
+  final channels = switch (colorType) {
+    0 => 1,
+    2 => 3,
+    3 => 1,
+    4 => 2,
+    _ => 4,
+  };
+  final stride = 1 + channels * width;
+  final expected = stride * height;
+  final raw = _inflate(imageData.takeBytes(), expected, name);
+  for (var row = 0; row < height; row++) {
+    if (raw[row * stride] > 4) {
+      throw FormatException('$name has an invalid row filter.');
+    }
+  }
   return PngInfo(width: width, height: height, colorType: colorType);
+}
+
+Uint8List _inflate(Uint8List compressed, int expected, String name) {
+  final raw = _tryInflate(compressed, expected);
+  if (raw == null) {
+    throw FormatException('$name has a damaged pixel stream.');
+  }
+  if (raw.length != expected) {
+    throw FormatException('$name has an unexpected pixel stream.');
+  }
+  return raw;
+}
+
+Uint8List? _tryInflate(Uint8List compressed, int expected) {
+  try {
+    return ZLibDecoder().decodeBytes(
+      compressed,
+      verify: true,
+      throwOnError: true,
+      maxOutputSize: expected,
+    );
+  } catch (_) {
+    return null;
+  }
 }
 
 int _uint32(Uint8List bytes, int start) =>

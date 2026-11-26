@@ -1,6 +1,6 @@
 # Companion Focus
 
-Companion Focus is an Android app for focus sessions, breaks, stopwatch laps and countdowns. It stores settings and session history on the device. You can import and manage companion packs without an account. The bundled catalogue is empty during development.
+Companion Focus is an Android app in development for focus sessions, breaks, stopwatch laps and countdowns. It stores settings and session history on the device. You can import and manage companion packs without an account. The bundled catalogue starts empty.
 
 ## Build
 
@@ -8,7 +8,8 @@ Use Flutter 3.44.0 and the [Android development setup](https://docs.flutter.dev/
 
 ```sh
 flutter create --empty --no-pub --platforms=android,web --org=app.companionfocus --project-name=companion_focus .
-flutter pub get
+git show HEAD:pubspec.lock > pubspec.lock
+flutter pub get --enforce-lockfile
 flutter run
 ```
 

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../core/time/timer_defaults.dart';
 import '../../design/companion_theme.dart';
 import 'focus_engine.dart';
 
@@ -54,15 +55,24 @@ class FocusPage extends StatefulWidget {
 
 class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   late final FocusEngine _engine;
+  late FocusPreset _preset;
   Timer? _ticker;
+  ({FocusOutcome outcome, String snapshot})? _pendingOutcome;
+  bool _savingOutcome = false;
+  bool _snapshotFailed = false;
+
+  FocusSettings get _selectedSettings => _preset.settings(widget.settings.value);
+  String _snapshot() => _engine.snapshot().encode(selectedPreset: _preset);
 
   @override
   void initState() {
     super.initState();
+    final saved = FocusSnapshot.tryDecode(widget.initialSnapshot);
+    _preset = saved?.preset ?? FocusPreset.defaults;
     _engine = FocusEngine(
-      settings: widget.settings.value,
+      settings: _selectedSettings,
       clock: widget.clock,
-      restored: FocusSnapshot.tryDecode(widget.initialSnapshot),
+      restored: saved,
       recoveredAt: widget.recoveryNow,
     )..prepare();
     widget.settings.addListener(_handleSettingsChanged);
@@ -117,7 +127,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
 
   void _handleSettingsChanged() {
     if (!mounted) return;
-    setState(() => _engine.updateSettings(widget.settings.value));
+    setState(() => _engine.updateSettings(_selectedSettings));
     if (_engine.status == FocusStatus.idle ||
         _engine.status == FocusStatus.ready) {
       _persist();
@@ -198,16 +208,29 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   }
 
   Future<void> _finish(FocusOutcome outcome) async {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() => _pendingOutcome = (outcome: outcome, snapshot: _snapshot()));
     _syncTicker();
     _notifyTimeline();
+    await _saveOutcome();
+  }
+
+  Future<void> _saveOutcome() async {
+    final pending = _pendingOutcome;
+    if (pending == null || _savingOutcome) return;
+    setState(() => _savingOutcome = true);
     try {
-      await widget.onOutcome(outcome, _engine.encodeSnapshot());
+      await widget.onOutcome(pending.outcome, pending.snapshot);
+      if (mounted) {
+        setState(() {
+          _pendingOutcome = null;
+          _snapshotFailed = false;
+        });
+      }
     } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text('Could not save this session.')),
-      );
+      // Keep the terminal snapshot and offer to retry before starting another session.
+    } finally {
+      if (mounted) setState(() => _savingOutcome = false);
     }
   }
 
@@ -221,7 +244,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
         ),
         content: Text(
           isBreak
-              ? 'The break will be recorded as cancelled.'
+              ? 'You can start another focus session when you are ready.'
               : 'You have focused for ${_formatDuration(_engine.elapsed)}. '
                     'The session will be recorded as cancelled.',
         ),
@@ -244,19 +267,30 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     unawaited(_finish(outcome));
   }
 
-  void _persist() {
-    if (_engine.status == FocusStatus.completed ||
-        _engine.status == FocusStatus.cancelled) {
+  void _selectPreset(FocusPreset preset) {
+    if (_pendingOutcome != null || _engine.hasActiveSession || _preset == preset) return;
+    setState(() {
+      _preset = preset;
+      _engine.updateSettings(_selectedSettings);
+    });
+    _persist(allowTerminal: true);
+  }
+
+  void _persist({bool allowTerminal = false}) {
+    if (_pendingOutcome != null ||
+        (!allowTerminal && (_engine.status == FocusStatus.completed ||
+            _engine.status == FocusStatus.cancelled))) {
       return;
     }
-    unawaited(_writeSnapshot(_engine.encodeSnapshot()));
+    unawaited(_writeSnapshot(_snapshot()));
   }
 
   Future<void> _writeSnapshot(String snapshot) async {
     try {
       await widget.onSnapshot(snapshot);
+      if (mounted && _snapshotFailed) setState(() => _snapshotFailed = false);
     } catch (_) {
-      // The shell retries on the next state change.
+      if (mounted && !_snapshotFailed) setState(() => _snapshotFailed = true);
     }
   }
 
@@ -313,12 +347,12 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
 
   int get _cycleDone {
     final count = _engine.completedFocusSessions;
-    final inCycle = count % 4;
+    final inCycle = count % TimerDefaults.sessionsPerCycle;
     if (inCycle == 0 &&
         count > 0 &&
         _engine.status == FocusStatus.completed &&
         _engine.phase == FocusPhase.focus) {
-      return 4;
+      return TimerDefaults.sessionsPerCycle;
     }
     return inCycle;
   }
@@ -336,7 +370,9 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     final showCycle =
         _engine.phase == FocusPhase.focus &&
         _engine.status != FocusStatus.idle;
-    final showPresets = !_engine.hasActiveSession;
+    final showPresets = !_engine.hasActiveSession && secondary == null;
+    final savePending = _pendingOutcome != null;
+    final config = _selectedSettings;
     final primary = _primaryAction;
 
     return LayoutBuilder(
@@ -394,7 +430,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
                     const SizedBox(height: 24),
                     FilledButton.icon(
                       key: FocusPage.primaryActionKey,
-                      onPressed: primary.onPressed,
+                       onPressed: savePending ? null : primary.onPressed,
                       icon: Icon(primary.icon),
                       label: Text(primary.label),
                       style: FilledButton.styleFrom(
@@ -404,23 +440,52 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
                     if (secondary != null) ...[
                       const SizedBox(height: 8),
                       TextButton.icon(
-                        onPressed: secondary.onPressed,
+                         onPressed: savePending ? null : secondary.onPressed,
                         icon: const Icon(Icons.close),
                         label: Text(secondary.label),
                       ),
                     ],
-                    if (showPresets) ...[
-                      const SizedBox(height: 16),
-                      Text(
-                        'Focus ${widget.settings.value.focusMinutes}m · '
-                        'Short ${widget.settings.value.shortBreakMinutes}m · '
-                        'Long ${widget.settings.value.longBreakMinutes}m',
+                     if (showPresets) ...[
+                       const SizedBox(height: 16),
+                       Wrap(
+                         alignment: WrapAlignment.center,
+                         spacing: 8,
+                         children: [
+                           for (final preset in FocusPreset.values)
+                             ChoiceChip(
+                               label: Text(preset.label),
+                               selected: _preset == preset,
+                               onSelected: savePending ? null : (selected) {
+                                 if (selected) _selectPreset(preset);
+                               },
+                             ),
+                         ],
+                       ),
+                       Text(
+                         'Focus ${config.focusMinutes}m · '
+                         'Short ${config.shortBreakMinutes}m · '
+                         'Long ${config.longBreakMinutes}m',
                         textAlign: TextAlign.center,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
-                    ],
+                     ],
+                     if (savePending || _snapshotFailed) ...[
+                       const SizedBox(height: 8),
+                       Semantics(
+                         liveRegion: true,
+                         child: Text(
+                           _savingOutcome ? 'Saving session…' : 'Could not save the timer.',
+                           textAlign: TextAlign.center,
+                         ),
+                       ),
+                       if (!_savingOutcome)
+                         TextButton(
+                           onPressed: savePending ? _saveOutcome : () => _persist(allowTerminal: true),
+                           child: const Text('Retry save'),
+                         ),
+                     ],
                   ],
                 ),
               ),
@@ -438,12 +503,12 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
       child: Column(
         children: [
           Semantics(
-            label: '$done of 4 focus sessions completed',
+              label: '$done of ${TimerDefaults.sessionsPerCycle} focus sessions completed',
             child: ExcludeSemantics(
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  for (var index = 0; index < 4; index++)
+                   for (var index = 0; index < TimerDefaults.sessionsPerCycle; index++)
                     Container(
                       width: 8,
                       height: 8,
@@ -461,7 +526,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 6),
           Text(
-            '$done of 4 focus sessions',
+            '$done of ${TimerDefaults.sessionsPerCycle} focus sessions',
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),

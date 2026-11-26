@@ -50,7 +50,11 @@ final class RigPlaybackEvent {
 /// properties they declare. A one-shot overlay is removed after it completes,
 /// revealing the default state again.
 final class RigPlayback {
-  RigPlayback({required this.rig, String? defaultClip}) {
+  RigPlayback({
+    required this.rig,
+    String? defaultClip,
+    double speed = 1,
+  }) : _speed = _checkedSpeed(speed) {
     final id = defaultClip ?? rig.defaultClip;
     if (id == null) return;
     final clip = rig.clipById(id);
@@ -63,6 +67,23 @@ final class RigPlayback {
   final CompanionRig rig;
   ClipInstance? _base;
   final List<ClipInstance> _overlays = <ClipInstance>[];
+  double _speed;
+
+  /// Multiplier applied to elapsed time. Scrubbing is unaffected.
+  double get speed => _speed;
+
+  set speed(double value) => _speed = _checkedSpeed(value);
+
+  static double _checkedSpeed(double value) {
+    if (!value.isFinite || value <= 0) {
+      throw ArgumentError.value(
+        value,
+        'speed',
+        'Playback speed must be finite and positive.',
+      );
+    }
+    return value;
+  }
 
   ClipInstance? get base => _base;
 
@@ -118,12 +139,13 @@ final class RigPlayback {
 
   List<RigPlaybackEvent> advance(double deltaMs) {
     final events = <RigPlaybackEvent>[];
-    if (deltaMs <= 0) return events;
+    final scaledDelta = deltaMs * _speed;
+    if (scaledDelta <= 0 || !scaledDelta.isFinite) return events;
 
     final base = _base;
-    if (base != null) _advanceInstance(base, deltaMs, events, removeOnComplete: false);
+    if (base != null) _advanceInstance(base, scaledDelta, events);
     for (final overlay in List<ClipInstance>.of(_overlays)) {
-      _advanceInstance(overlay, deltaMs, events, removeOnComplete: true);
+      _advanceInstance(overlay, scaledDelta, events);
     }
     _overlays.removeWhere((instance) => instance.isComplete);
     return events;
@@ -176,9 +198,8 @@ final class RigPlayback {
   static void _advanceInstance(
     ClipInstance instance,
     double deltaMs,
-    List<RigPlaybackEvent> events, {
-    required bool removeOnComplete,
-  }) {
+    List<RigPlaybackEvent> events,
+  ) {
     if (instance.isComplete) return;
     final duration = instance.clip.durationMs.toDouble();
     instance.timeMs += deltaMs;

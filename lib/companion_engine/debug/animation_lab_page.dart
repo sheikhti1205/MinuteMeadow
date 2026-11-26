@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -8,9 +9,12 @@ import '../render/affine2.dart';
 import '../render/atlas_cache.dart';
 import '../render/companion_pose.dart';
 import '../render/sprite_painter.dart';
+import '../rig/manifest_inspection.dart';
+import '../rig/rig_codec.dart';
 import '../rig/rig_model.dart';
 import '../scene/companion_scene.dart';
 import 'geometric_rig.dart';
+import 'rig_file_loader.dart';
 
 /// Development-only inspection surface for the companion compositor.
 ///
@@ -24,7 +28,7 @@ class AnimationLabPage extends StatefulWidget {
 }
 
 class _AnimationLabPageState extends State<AnimationLabPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   CompanionRig? _rig;
   AtlasCache? _atlas;
   RigPlayback? _playback;
@@ -34,6 +38,7 @@ class _AnimationLabPageState extends State<AnimationLabPage>
 
   bool _playing = true;
   int _pixelScale = 2;
+  double _speed = 1;
   String _clipId = 'idle';
   bool _showGrid = true;
   bool _showPivots = false;
@@ -41,8 +46,17 @@ class _AnimationLabPageState extends State<AnimationLabPage>
   bool _showLayers = false;
   int _background = 0;
   bool _wasPetting = false;
+  bool _lifecycleActive = true;
+  bool _tickerModeEnabled = true;
   Duration _lastTick = Duration.zero;
   int _loadGeneration = 0;
+
+  RigManifestInspection? _inspection;
+  CompanionRig? _pendingRig;
+  RigManifestInspection? _pendingInspection;
+  String _sourceLabel = 'geometric fixture';
+  String _inspectionSource = 'geometric fixture';
+  String? _loadStatus;
 
   final Set<String> _hiddenLayers = <String>{};
   final Map<String, double> _layerOpacity = <String, double>{};
@@ -51,15 +65,45 @@ class _AnimationLabPageState extends State<AnimationLabPage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _ticker = createTicker(_onTick);
     _load();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _atlas?.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (enabled == _tickerModeEnabled) return;
+    _tickerModeEnabled = enabled;
+    _lastTick = Duration.zero;
+    if (!enabled) {
+      if (_ticker.isActive) _ticker.stop();
+    } else if (_playing && _lifecycleActive) {
+      // A muted ticker keeps its original start time, so restart it to avoid a
+      // large elapsed jump on the first frame after unmuting.
+      if (_ticker.isActive) _ticker.stop();
+      _ticker.start();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleActive = state == AppLifecycleState.resumed;
+    if (_lifecycleActive && _playing && _tickerModeEnabled) {
+      _lastTick = Duration.zero;
+      if (!_ticker.isActive) _ticker.start();
+    } else if (_ticker.isActive) {
+      _ticker.stop();
+    }
   }
 
   Future<void> _load() async {
@@ -76,18 +120,32 @@ class _AnimationLabPageState extends State<AnimationLabPage>
       final clipId =
           bundle.rig.defaultClip ??
           (bundle.rig.clips.isEmpty ? null : bundle.rig.clips.keys.first);
+      final rawManifest = RigCodec.encode(bundle.rig);
       setState(() {
         _atlas = cache;
         _rig = bundle.rig;
-        _scene = CompanionScene(companionSize: bundle.rig.canvasSize);
+        _scene = _sceneFor(bundle.rig);
         _clipId = clipId ?? '';
-        _playback = RigPlayback(rig: bundle.rig, defaultClip: clipId);
+        _playback = RigPlayback(
+          rig: bundle.rig,
+          defaultClip: clipId,
+          speed: _speed,
+        );
+        _inspection = RigManifestInspection.valid(
+          raw: rawManifest,
+          parsedRig: bundle.rig,
+        );
+        _inspectionSource = 'geometric fixture';
+        _sourceLabel = 'geometric fixture';
+        _pendingRig = null;
+        _pendingInspection = null;
+        _loadStatus = null;
         _error = null;
         _log.clear();
         _wasPetting = false;
       });
       previous?.dispose();
-      if (_playing && !_ticker.isActive) {
+      if (_playing && _lifecycleActive && _tickerModeEnabled && !_ticker.isActive) {
         _lastTick = Duration.zero;
         _ticker.start();
       }
@@ -97,15 +155,258 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     }
   }
 
+  CompanionScene _sceneFor(CompanionRig rig) => CompanionScene(
+    field: Size(
+      math.max(160.0, rig.canvasWidth + 48.0),
+      math.max(120.0, rig.canvasHeight + 48.0),
+    ),
+    companionSize: rig.canvasSize,
+  );
+
+  bool _hasAtlases(CompanionRig rig, AtlasCache cache) {
+    for (final atlas in rig.atlases.values) {
+      final image = cache.image(atlas.id);
+      if (image == null ||
+          image.width != atlas.width ||
+          image.height != atlas.height) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  List<String> _missingAtlasIds(CompanionRig rig, AtlasCache cache) => [
+    for (final atlas in rig.atlases.values)
+      if (!_hasAtlas(atlas, cache)) atlas.id,
+  ];
+
+  bool _hasAtlas(AtlasDefinition atlas, AtlasCache cache) {
+    final image = cache.image(atlas.id);
+    return image != null &&
+        image.width == atlas.width &&
+        image.height == atlas.height;
+  }
+
+  void _applyRig(
+    CompanionRig rig, {
+    required RigManifestInspection inspection,
+    required String sourceLabel,
+  }) {
+    final cache = _atlas;
+    if (cache == null) return;
+    cache.retain(rig.atlases.keys.toSet());
+    final clipId = rig.defaultClip ??
+        (rig.clips.isEmpty ? null : rig.clips.keys.first);
+    setState(() {
+      _rig = rig;
+      _scene = _sceneFor(rig);
+      _clipId = clipId ?? '';
+      _playback = RigPlayback(
+        rig: rig,
+        defaultClip: clipId,
+        speed: _speed,
+      );
+      _inspection = inspection;
+      _inspectionSource = sourceLabel;
+      _sourceLabel = sourceLabel;
+      _pendingRig = null;
+      _pendingInspection = null;
+      _loadStatus = null;
+      _hiddenLayers.clear();
+      _layerOpacity.clear();
+      _log.clear();
+      _wasPetting = false;
+    });
+    _lastTick = Duration.zero;
+    if (_playing && _lifecycleActive && _tickerModeEnabled && !_ticker.isActive) {
+      _ticker.start();
+    }
+  }
+
+  void _setSpeed(double value) {
+    _playback?.speed = value;
+    setState(() => _speed = value);
+  }
+
+  void _setFileError(String message) {
+    if (!mounted) return;
+    setState(() => _loadStatus = message);
+  }
+
+  Future<void> _loadManifest() async {
+    try {
+      final file = await RigFileLoader.pickManifest();
+      if (file == null || !mounted) return;
+      final raw = await RigFileLoader.readManifestText(file);
+      if (!mounted) return;
+      final inspection = RigManifestInspection.inspect(raw);
+      final rig = inspection.rig;
+      if (rig == null) {
+        setState(() {
+          _inspection = inspection;
+          _inspectionSource = file.name;
+          _loadStatus =
+              'Rejected ${file.name}: ${inspection.issues.length} issue(s)';
+        });
+        await _showManifestInspector();
+        return;
+      }
+      final cache = _atlas;
+      if (cache == null) return;
+      if (_hasAtlases(rig, cache)) {
+        _applyRig(
+          rig,
+          inspection: inspection,
+          sourceLabel: file.name,
+        );
+      } else {
+        setState(() {
+          _inspection = inspection;
+          _inspectionSource = file.name;
+          _pendingRig = rig;
+          _pendingInspection = inspection;
+          _loadStatus =
+              'Atlas needed: ${_missingAtlasIds(rig, cache).join(', ')}';
+        });
+      }
+    } on RigFileException catch (error) {
+      _setFileError(error.message);
+    } on Exception {
+      _setFileError('Could not load that manifest.');
+    }
+  }
+
+  Future<void> _loadAtlas() async {
+    final candidate = _pendingRig ?? _rig;
+    final cache = _atlas;
+    if (candidate == null || cache == null) return;
+    try {
+      final file = await RigFileLoader.pickAtlas();
+      if (file == null || !mounted) return;
+      final atlasId = RigFileLoader.resolveAtlasId(
+        candidate,
+        file.name,
+        loadedAtlasIds: cache.atlasIds,
+      );
+      final atlas = candidate.atlases[atlasId];
+      if (atlas == null) {
+        throw RigFileException('The manifest has no atlas "$atlasId".');
+      }
+      final bytes = await RigFileLoader.readAtlasBytes(file);
+      if (!mounted) return;
+      final image = await AtlasCache.decode(bytes);
+      if (!mounted) {
+        image.dispose();
+        return;
+      }
+      final actualWidth = image.width;
+      final actualHeight = image.height;
+      if (actualWidth != atlas.width || actualHeight != atlas.height) {
+        image.dispose();
+        throw RigFileException(
+          'Atlas "${atlas.id}" is ${actualWidth}x$actualHeight; '
+          'the manifest expects ${atlas.width}x${atlas.height}.',
+        );
+      }
+      cache.put(atlasId, image);
+      final pending = _pendingRig;
+      final pendingInspection = _pendingInspection;
+      if (pending != null &&
+          pendingInspection != null &&
+          _hasAtlases(pending, cache)) {
+        _applyRig(
+          pending,
+          inspection: pendingInspection,
+          sourceLabel: _inspectionSource,
+        );
+      } else {
+        setState(() => _loadStatus = 'Loaded atlas ${atlas.id}');
+      }
+    } on RigFileException catch (error) {
+      _setFileError(error.message);
+    } on Exception {
+      _setFileError('Could not load that atlas image.');
+    }
+  }
+
+  Future<void> _showManifestInspector() async {
+    if (!mounted) return;
+    final inspection = _inspection;
+    if (inspection == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        final rig = inspection.rig;
+        final issues = inspection.issues;
+        final small = Theme.of(context).textTheme.bodySmall;
+        return AlertDialog(
+          title: const Text('Rig manifest'),
+          content: SizedBox(
+            width: 560,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SelectableText('Source: $_inspectionSource'),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      rig == null
+                          ? 'Invalid · ${issues.length} issue(s)'
+                          : 'Valid · schema ${rig.schemaVersion} of '
+                                '${CompanionRig.currentSchemaVersion} · '
+                                '${rig.layers.length} layers · '
+                                '${rig.clips.length} clips',
+                    ),
+                    if (issues.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      for (final issue in issues)
+                        SelectableText(
+                          '• $issue',
+                          style: small?.copyWith(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                    ],
+                    const Divider(),
+                    const Text('Raw manifest'),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      inspection.raw,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _onTick(Duration elapsed) {
     final playback = _playback;
     final scene = _scene;
     if (playback == null || scene == null) return;
     final delta = elapsed - _lastTick;
     _lastTick = elapsed;
-    if (!_playing || delta <= Duration.zero) return;
+    if (!_playing || !_lifecycleActive || !_tickerModeEnabled) return;
+    if (delta <= Duration.zero) return;
     final events = playback.advance(delta.inMicroseconds / 1000);
-    scene.advance(delta);
+    scene.advance(
+      Duration(microseconds: (delta.inMicroseconds * _speed).round()),
+    );
     for (final event in events) {
       if (event.completed) _logLine('${event.clipId} completed');
     }
@@ -118,7 +419,10 @@ class _AnimationLabPageState extends State<AnimationLabPage>
 
   void _syncMotion(RigPlayback playback, CompanionScene scene) {
     final petting = scene.motion == CompanionMotion.petting;
-    if (petting && !_wasPetting && _clipId != 'pet') {
+    if (petting &&
+        !_wasPetting &&
+        _clipId != 'pet' &&
+        playback.rig.clipById('pet') != null) {
       playback.play('pet');
     }
     _wasPetting = petting;
@@ -126,7 +430,7 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     final walking =
         scene.motion == CompanionMotion.chasing ||
         scene.motion == CompanionMotion.returning;
-    if (_clipId != 'walk') {
+    if (_clipId != 'walk' && playback.rig.clipById('walk') != null) {
       if (walking && !playback.isPlaying('walk')) playback.play('walk');
       if (!walking && playback.isPlaying('walk')) playback.stop('walk');
     }
@@ -137,7 +441,9 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     setState(() => _playing = value);
     if (value) {
       _lastTick = Duration.zero;
-      if (!_ticker.isActive) _ticker.start();
+      if (_lifecycleActive && _tickerModeEnabled && !_ticker.isActive) {
+        _ticker.start();
+      }
     } else if (_ticker.isActive) {
       _ticker.stop();
     }
@@ -148,7 +454,7 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     if (rig == null) return;
     setState(() {
       _clipId = id;
-      _playback = RigPlayback(rig: rig, defaultClip: id);
+      _playback = RigPlayback(rig: rig, defaultClip: id, speed: _speed);
       _wasPetting = false;
     });
   }
@@ -234,9 +540,12 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     CompanionSceneEventType.pet => 'pet',
     CompanionSceneEventType.ballThrown => 'ball thrown',
     CompanionSceneEventType.ballBounced => 'ball bounced',
+    CompanionSceneEventType.ballRolling => 'ball rolling',
     CompanionSceneEventType.ballCaught => 'ball caught',
     CompanionSceneEventType.ballReturned => 'ball returned',
     CompanionSceneEventType.ballMissed => 'ball missed',
+    CompanionSceneEventType.movementCompleted => 'movement completed',
+    _ => type.name,
   };
 
   Affine2 _rootTransform(CompanionScene scene) {
@@ -259,7 +568,16 @@ class _AnimationLabPageState extends State<AnimationLabPage>
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Animation lab')),
+    appBar: AppBar(
+      title: const Text('Animation lab'),
+      actions: [
+        IconButton(
+          tooltip: 'Manifest',
+          icon: const Icon(Icons.description_outlined),
+          onPressed: _inspection == null ? null : _showManifestInspector,
+        ),
+      ],
+    ),
     body: SafeArea(child: _body(context)),
   );
 
@@ -344,11 +662,12 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     final rig = _rig!;
     final playback = _playback!;
     final scene = _scene!;
-    final clip = rig.clipById(_clipId);
+    final hasClip = rig.clips.containsKey(_clipId);
+    final clip = hasClip ? rig.clipById(_clipId) : null;
     final duration = (clip?.durationMs ?? 1).toDouble();
-    final time = (playback.timeOf(_clipId) ?? 0)
-        .clamp(0.0, duration)
-        .toDouble();
+    final time = hasClip
+        ? (playback.timeOf(_clipId) ?? 0).clamp(0.0, duration).toDouble()
+        : 0.0;
     final small = Theme.of(context).textTheme.bodySmall;
 
     return Material(
@@ -398,15 +717,18 @@ class _AnimationLabPageState extends State<AnimationLabPage>
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 DropdownButton<String>(
-                  value: _clipId,
+                  value: hasClip ? _clipId : null,
                   isDense: true,
+                  hint: const Text('No clips'),
                   items: <DropdownMenuItem<String>>[
                     for (final id in rig.clips.keys)
                       DropdownMenuItem<String>(value: id, child: Text(id)),
                   ],
-                  onChanged: (value) {
-                    if (value != null) _selectClip(value);
-                  },
+                  onChanged: rig.clips.isEmpty
+                      ? null
+                      : (value) {
+                          if (value != null) _selectClip(value);
+                        },
                 ),
                 DropdownButton<int>(
                   value: _pixelScale,
@@ -419,6 +741,20 @@ class _AnimationLabPageState extends State<AnimationLabPage>
                   ],
                   onChanged: (value) {
                     if (value != null) setState(() => _pixelScale = value);
+                  },
+                ),
+                DropdownButton<double>(
+                  value: _speed,
+                  isDense: true,
+                  items: const <DropdownMenuItem<double>>[
+                    DropdownMenuItem<double>(value: 0.25, child: Text('0.25x')),
+                    DropdownMenuItem<double>(value: 0.5, child: Text('0.5x')),
+                    DropdownMenuItem<double>(value: 1, child: Text('1x')),
+                    DropdownMenuItem<double>(value: 2, child: Text('2x')),
+                    DropdownMenuItem<double>(value: 4, child: Text('4x')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) _setSpeed(value);
                   },
                 ),
                 FilterChip(
@@ -457,13 +793,29 @@ class _AnimationLabPageState extends State<AnimationLabPage>
                   onPressed: _throwDefault,
                 ),
                 ActionChip(label: const Text('Reset'), onPressed: _reset),
+                ActionChip(
+                  label: const Text('Load rig'),
+                  onPressed: _loadManifest,
+                ),
+                ActionChip(
+                  label: const Text('Load atlas'),
+                  onPressed: _loadAtlas,
+                ),
+                ActionChip(
+                  label: const Text('Manifest'),
+                  onPressed: _inspection == null
+                      ? null
+                      : _showManifestInspector,
+                ),
               ],
             ),
             const SizedBox(height: 4),
             Text(
               '${scene.motion.name} · ball ${scene.ballPhase.name} · '
               'bounces ${scene.bounces} · pets ${scene.petCount} · '
-              'facing ${scene.facing < 0 ? 'left' : 'right'}',
+              'facing ${scene.facing < 0 ? 'left' : 'right'} · '
+              '$_sourceLabel'
+              '${_loadStatus == null ? '' : ' · $_loadStatus'}',
               style: small,
             ),
             if (_showLayers) ...[

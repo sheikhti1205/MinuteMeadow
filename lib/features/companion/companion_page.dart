@@ -458,8 +458,6 @@ class _PackHeading extends StatelessWidget {
             color: theme.colorScheme.onSurfaceVariant,
           ),
         ),
-        const SizedBox(height: 4),
-        Text(manifest.license, style: theme.textTheme.labelMedium),
       ],
     );
   }

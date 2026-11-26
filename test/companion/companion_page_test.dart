@@ -33,6 +33,11 @@ void main() {
     expect(find.text('Browse marketplace'), findsOneWidget);
     expect(find.byTooltip('Import pack'), findsOneWidget);
     expect(find.byTooltip('Marketplace'), findsNothing);
+
+    await tester.tap(find.byTooltip('Import pack'));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose a pack file'), findsOneWidget);
+    expect(find.text('Paste pack JSON'), findsOneWidget);
   });
 
   testWidgets('lists an installed companion', (tester) async {
@@ -99,7 +104,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Paste pack JSON'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '{"schema": 2}');
+    await tester.enterText(
+      find.byType(TextField),
+      '{"schema": 2, "manifest": {}, "assets": {}}',
+    );
     await tester.pump();
     await tester.tap(find.widgetWithText(FilledButton, 'Install'));
     await tester.pumpAndSettle();
@@ -172,6 +180,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('layered view'), findsOneWidget);
+    expect(find.byType(Image), findsNothing);
   });
 
   testWidgets('shows a stored notice for an unreadable snapshot', (tester) async {

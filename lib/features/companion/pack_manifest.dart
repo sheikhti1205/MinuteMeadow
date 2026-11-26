@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 import 'pack_json.dart';
+import 'pack_motion.dart';
+import 'pack_sound.dart';
 import 'png.dart';
 
 /// Hard limits applied to every pack document and asset.
@@ -48,7 +50,7 @@ final _segment = RegExp(_segmentPattern);
 final _path = RegExp(_pathPattern);
 
 /// Rejects asset paths that could escape the pack or name a non-image.
-String validateAssetPath(String path) {
+String validateAssetPath(String path, {bool allowSound = false}) {
   if (path.length < 5 || path.length > 120) {
     throw const FormatException('An asset path has an invalid length.');
   }
@@ -60,11 +62,8 @@ String validateAssetPath(String path) {
       throw const FormatException('An asset path is not safe.');
     }
   }
-  if (!path.toLowerCase().endsWith('.png')) {
-    throw const FormatException('Pack assets must be PNG images.');
-  }
-  if (path == 'manifest.json') {
-    throw const FormatException('An asset may not replace the manifest.');
+  if (!path.toLowerCase().endsWith('.png') && !(allowSound && isWaveAsset(path))) {
+    throw const FormatException('Use PNG images or WAV files under sounds/.');
   }
   return path;
 }
@@ -89,12 +88,13 @@ List<int> _versionNumbers(String version) {
 }
 
 class PackLayer {
-  const PackLayer({required this.id, required this.z});
+  const PackLayer({required this.id, required this.z, this.pose = const PackLayerPose()});
 
   final String id;
   final int z;
+  final PackLayerPose pose;
 
-  Map<String, Object?> toJson() => {'id': id, 'z': z};
+  Map<String, Object?> toJson() => {'id': id, 'z': z, ...pose.toJson()};
 }
 
 class PackRect {
@@ -123,19 +123,50 @@ class PackFrame {
 }
 
 class PackClip {
-  const PackClip({required this.id, required this.fps, required this.loop, required this.frames});
+  const PackClip({
+    required this.id,
+    required this.fps,
+    required this.loop,
+    required this.frames,
+    this.durationMs,
+    this.tracks = const [],
+    this.events = const [],
+    this.state,
+  });
 
   final String id;
   final int fps;
   final bool loop;
   final List<PackFrame> frames;
+  final int? durationMs;
+  final List<PackMotionTrack> tracks;
+  final List<PackMotionMarker> events;
+  final PackStatePolicy? state;
+
+  int get frameDurationMs => (1000 / fps).round();
+  int get timelineDurationMs => durationMs ?? _frameSpan(frames, fps);
 
   Map<String, Object?> toJson() => {
     'id': id,
     'fps': fps,
     'loop': loop,
     'frames': [for (final frame in frames) frame.toJson()],
+    if (durationMs != null) 'durationMs': durationMs,
+    if (tracks.isNotEmpty) 'tracks': [for (final track in tracks) track.toJson()],
+    if (events.isNotEmpty) 'events': [for (final event in events) event.toJson()],
+    if (state != null) 'state': state!.toJson(),
   };
+
+  static int _frameSpan(List<PackFrame> frames, int fps) {
+    final totals = <String, int>{};
+    var longest = 1;
+    for (final frame in frames) {
+      final count = (totals[frame.layer] ?? 0) + 1;
+      totals[frame.layer] = count;
+      if (count > longest) longest = count;
+    }
+    return (1000 / fps).round() * longest;
+  }
 }
 
 class PackAssetRef {
@@ -176,6 +207,7 @@ class PackManifest {
     this.attribution,
     this.homepage,
     this.minimumAppVersion,
+    this.sounds = const [],
   }) : _assetsByPath = {for (final asset in assets) asset.path: asset};
 
   static const schema = 'companion.pack/1';
@@ -197,6 +229,7 @@ class PackManifest {
   final String? attribution;
   final String? homepage;
   final String? minimumAppVersion;
+  final List<PackSound> sounds;
   final Map<String, PackAssetRef> _assetsByPath;
 
   PackAssetRef? asset(String path) => _assetsByPath[path];
@@ -227,6 +260,7 @@ class PackManifest {
       'layers': [for (final layer in layers) layer.toJson()],
       'clips': [for (final clip in clips) clip.toJson()],
       'assets': [for (final asset in sortedAssets) asset.toJson()],
+      if (sounds.isNotEmpty) 'sounds': [for (final sound in sounds) sound.toJson()],
     };
   }
 
@@ -235,7 +269,7 @@ class PackManifest {
       json,
       'The manifest',
       required: const {'schema', 'id', 'version', 'name', 'author', 'license', 'preview', 'canvas', 'palette', 'layers', 'clips', 'assets'},
-      optional: const {'description', 'attribution', 'homepage', 'application'},
+      optional: const {'description', 'attribution', 'homepage', 'application', 'sounds'},
     );
     if (map['schema'] != schema) {
       throw FormatException('Unsupported manifest version. This build reads $schema.');
@@ -338,6 +372,7 @@ class PackManifest {
       attribution: attribution,
       homepage: homepage,
       minimumAppVersion: minimumAppVersion,
+      sounds: map.containsKey('sounds') ? PackSound.readList(map['sounds']) : const [],
     );
     manifest._crossCheck();
     return manifest;
@@ -348,7 +383,38 @@ class PackManifest {
     if (!paths.contains(preview)) {
       throw const FormatException('The preview must be one of the pack assets.');
     }
+    for (final sound in sounds) {
+      validateAssetPath(sound.asset, allowSound: true);
+      if (!isWaveAsset(sound.asset) || !paths.contains(sound.asset)) {
+        throw const FormatException('A sound must reference a declared WAV asset.');
+      }
+    }
+    final usedSounds = {for (final sound in sounds) sound.asset};
+    if (paths.any((path) => isWaveAsset(path) && !usedSounds.contains(path))) {
+      throw const FormatException('A WAV asset must be assigned to a sound event.');
+    }
     final layerIds = {for (final layer in layers) layer.id};
+    final parents = {for (final layer in layers) layer.id: layer.pose.parent};
+    for (final layer in layers) {
+      final visited = <String>{layer.id};
+      var parent = layer.pose.parent;
+      while (parent != null) {
+        if (!layerIds.contains(parent) || !visited.add(parent)) {
+          throw FormatException('Layer ${layer.id} has an invalid parent chain.');
+        }
+        parent = parents[parent];
+      }
+    }
+    final drawnLayers = {
+      for (final clip in clips)
+        for (final frame in clip.frames) frame.layer,
+    };
+    for (final layer in layers) {
+      final parent = layer.pose.parent;
+      if (parent != null && drawnLayers.contains(layer.id) && !drawnLayers.contains(parent)) {
+        throw FormatException('Layer ${layer.id} has a parent without a sprite.');
+      }
+    }
     final clipIds = <String>{};
     for (final clip in clips) {
       if (!clipIds.add(clip.id)) {
@@ -360,6 +426,11 @@ class PackManifest {
         }
         if (!paths.contains(frame.asset)) {
           throw FormatException('Clip ${clip.id} names an unknown asset.');
+        }
+      }
+      for (final track in clip.tracks) {
+        if (!layerIds.contains(track.layer) || !drawnLayers.contains(track.layer)) {
+          throw FormatException('Clip ${clip.id} animates a layer without a sprite.');
         }
       }
     }
@@ -387,8 +458,13 @@ class PackManifest {
       if (sha256.convert(data).toString() != ref.sha256) {
         throw FormatException('${ref.path} does not match its declared checksum.');
       }
-      final image = inspectPng(data, ref.path);
-      verified[ref.path] = PackAsset(bytes: data, width: image.width, height: image.height);
+      if (isWaveAsset(ref.path)) {
+        verifyWave(data, ref.path);
+        verified[ref.path] = PackAsset(bytes: data, width: 0, height: 0);
+      } else {
+        final image = inspectPng(data, ref.path);
+        verified[ref.path] = PackAsset(bytes: data, width: image.width, height: image.height);
+      }
     }
     for (final clip in clips) {
       for (final frame in clip.frames) {
@@ -415,7 +491,7 @@ class PackManifest {
     for (final item in value) {
       final map = packObject(item, 'An asset', required: const {'path', 'sha256', 'bytes'});
       final path = packText(map['path'], 'An asset path', min: 5, max: 120);
-      validateAssetPath(path);
+      validateAssetPath(path, allowSound: true);
       if (!paths.add(path)) {
         throw FormatException('The pack repeats the asset $path.');
       }
@@ -450,7 +526,12 @@ class PackManifest {
     final ids = <String>{};
     final depths = <int>{};
     for (final item in value) {
-      final map = packObject(item, 'A layer', required: const {'id', 'z'});
+      final map = packObject(
+        item,
+        'A layer',
+        required: const {'id', 'z'},
+        optional: const {'parent', 'offset', 'pivot', 'rotationDegrees', 'scale', 'opacity', 'visible'},
+      );
       final id = packText(
         map['id'],
         'A layer id',
@@ -466,7 +547,7 @@ class PackManifest {
       if (!depths.add(z)) {
         throw const FormatException('Two layers share a depth.');
       }
-      layers.add(PackLayer(id: id, z: z));
+      layers.add(PackLayer(id: id, z: z, pose: PackLayerPose.read(map)));
     }
     return List.unmodifiable(layers);
   }
@@ -481,6 +562,7 @@ class PackManifest {
         item,
         'A clip',
         required: const {'id', 'fps', 'loop', 'frames'},
+        optional: const {'durationMs', 'tracks', 'events', 'state'},
       );
       final id = packText(
         map['id'],
@@ -527,7 +609,21 @@ class PackManifest {
         );
         frames.add(PackFrame(layer: layer, asset: assetPath, rect: rect));
       }
-      clips.add(PackClip(id: id, fps: fps, loop: loop, frames: List.unmodifiable(frames)));
+      final minimumDuration = PackClip._frameSpan(frames, fps);
+      final duration = map.containsKey('durationMs')
+          ? packInteger(map['durationMs'], 'A clip duration', min: minimumDuration, max: 120000)
+          : null;
+      final timeline = duration ?? minimumDuration;
+      clips.add(PackClip(
+        id: id,
+        fps: fps,
+        loop: loop,
+        frames: List.unmodifiable(frames),
+        durationMs: duration,
+        tracks: map.containsKey('tracks') ? PackMotionTrack.readList(map['tracks'], timeline) : const [],
+        events: map.containsKey('events') ? PackMotionMarker.readList(map['events'], timeline) : const [],
+        state: map.containsKey('state') ? PackStatePolicy.read(map['state']) : null,
+      ));
     }
     return List.unmodifiable(clips);
   }
