@@ -30,7 +30,7 @@ jobs:
       - name: Free space for the Android emulator and debug build
         run: |
           df -h "$RUNNER_TEMP"
-          sudo rm -rf -- /usr/local/share/dotnet /opt/ghc
+          sudo rm -rf -- /usr/local/share/dotnet /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/vcpkg /usr/share/miniconda /home/linuxbrew
           df -h "$RUNNER_TEMP"
       - name: Allow Android emulator access to KVM
         run: |
