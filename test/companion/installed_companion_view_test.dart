@@ -1,8 +1,6 @@
 import 'package:companion_focus/app/installed_companion_view.dart';
 import 'package:companion_focus/companion_engine/debug/geometric_rig.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
@@ -134,7 +132,7 @@ void main() {
     expect(stageSemantics, findsOneWidget);
     final data = tester.getSemantics(stageSemantics).getSemanticsData();
     expect(data.label, 'Companion stage. Petted companion');
-    expect(data.hasFlag(SemanticsFlag.isLiveRegion), isTrue);
+    expect(data.flagsCollection.isLiveRegion, isTrue);
     expect(
       tester.getSize(find.byType(InstalledCompanionView)).height,
       moreOrLessEquals(200),

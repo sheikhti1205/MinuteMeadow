@@ -168,7 +168,7 @@ void main() {
     final data = tester.getSemantics(action).getSemanticsData();
     expect(data.label, 'Edit focus and break durations in settings');
     expect(data.hasAction(SemanticsAction.tap), isTrue);
-    expect(data.hasFlag(SemanticsFlag.isEnabled), isTrue);
+    expect(data.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
     expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
 
     await tester.tap(action);
@@ -644,7 +644,7 @@ void main() {
     expect(detector.enabled, isTrue);
     expect(detector.shortcuts, isNotEmpty);
 
-    tester.binding.pipelineOwner.semanticsOwner!.performAction(
+    tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
       slideNode.id,
       SemanticsAction.tap,
     );
