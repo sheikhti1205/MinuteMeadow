@@ -632,65 +632,10 @@ class _ClockPageState extends State<ClockPage> with WidgetsBindingObserver {
   }
 
   Future<void> _showAddPresetDialog() async {
-    final labelController = TextEditingController();
-    final minutesController = TextEditingController(text: '10');
-    final formKey = GlobalKey<FormState>();
-
     final draft = await showDialog<_PresetDraft>(
       context: context,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text('Add countdown preset'),
-          content: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                TextFormField(
-                  controller: labelController,
-                  decoration: const InputDecoration(
-                    labelText: 'Label (optional)',
-                  ),
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: minutesController,
-                  decoration: const InputDecoration(labelText: 'Minutes'),
-                  keyboardType: TextInputType.number,
-                  validator: _validateMinutes,
-                ),
-              ],
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final form = formKey.currentState;
-                if (form == null || !form.validate()) {
-                  return;
-                }
-                Navigator.of(dialogContext).pop(
-                  _PresetDraft(
-                    label: labelController.text,
-                    minutes: int.parse(minutesController.text.trim()),
-                  ),
-                );
-              },
-              child: const Text('Add'),
-            ),
-          ],
-        );
-      },
+      builder: (BuildContext dialogContext) => const _AddPresetDialog(),
     );
-
-    labelController.dispose();
-    minutesController.dispose();
-
     if (draft == null || !mounted) {
       return;
     }
@@ -702,14 +647,93 @@ class _ClockPageState extends State<ClockPage> with WidgetsBindingObserver {
     });
     _persistSnapshot();
   }
+}
 
-  String? _validateMinutes(String? value) {
-    final minutes = int.tryParse((value ?? '').trim());
-    if (minutes == null || minutes < 1 || minutes > 1440) {
-      return 'Enter 1-1440 minutes';
-    }
-    return null;
+/// Owns its text controllers so they outlive the dialog's pop animation.
+///
+/// Disposing them in [_ClockPageState] as soon as `showDialog` resolved left
+/// the still-animating fields listening to disposed controllers.
+class _AddPresetDialog extends StatefulWidget {
+  const _AddPresetDialog();
+
+  @override
+  State<_AddPresetDialog> createState() => _AddPresetDialogState();
+}
+
+class _AddPresetDialogState extends State<_AddPresetDialog> {
+  final TextEditingController _labelController = TextEditingController();
+  final TextEditingController _minutesController = TextEditingController(
+    text: '10',
+  );
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+
+  @override
+  void dispose() {
+    _labelController.dispose();
+    _minutesController.dispose();
+    super.dispose();
   }
+
+  void _submit() {
+    final form = _formKey.currentState;
+    if (form == null || !form.validate()) {
+      return;
+    }
+    Navigator.of(context).pop(
+      _PresetDraft(
+        label: _labelController.text,
+        minutes: int.parse(_minutesController.text.trim()),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      // A soft keyboard, a short screen or large text must never overflow the
+      // dialog; the fields scroll instead.
+      scrollable: true,
+      title: const Text('Add countdown preset'),
+      content: Form(
+        key: _formKey,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextFormField(
+              controller: _labelController,
+              decoration: const InputDecoration(
+                labelText: 'Label (optional)',
+              ),
+              textInputAction: TextInputAction.next,
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: _minutesController,
+              decoration: const InputDecoration(labelText: 'Minutes'),
+              keyboardType: TextInputType.number,
+              validator: _validateMinutes,
+              onFieldSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Add')),
+      ],
+    );
+  }
+}
+
+String? _validateMinutes(String? value) {
+  final minutes = int.tryParse((value ?? '').trim());
+  if (minutes == null || minutes < 1 || minutes > 1440) {
+    return 'Enter 1-1440 minutes';
+  }
+  return null;
 }
 
 class _PresetDraft {

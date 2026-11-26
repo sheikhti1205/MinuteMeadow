@@ -174,9 +174,9 @@ void main() {
     await tester.pumpWidget(_harness(engine));
 
     await tester.tap(find.text('Countdown'));
-    await tester.pump();
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Short break'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(engine.selectedPresetId, preset.id);
     expect(engine.countdownDuration, const Duration(minutes: 5));
@@ -451,10 +451,17 @@ void main() {
     );
     expect(deadlines.single, wall.add(const Duration(minutes: 9)));
 
+    // Drive the real lifecycle state machine: `paused` is only reachable
+    // through inactive/hidden, and `resumed` only through inactive.
     wall = wall.add(const Duration(hours: 1));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
     await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
     await tester.pump();
 
     expect(deadlines, hasLength(2));
