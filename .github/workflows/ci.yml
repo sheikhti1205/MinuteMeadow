@@ -6,6 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      build_web:
+        description: Build and retain the web app
+        type: boolean
+        default: false
+      build_android:
+        description: Build the Android debug APK
+        type: boolean
+        default: false
       include_development_tools:
         description: Include the Animation laboratory and geometric catalogue in the web artifact
         type: boolean
@@ -15,8 +23,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: flutter-ci-${{ github.ref }}-${{ inputs.include_development_tools == true }}
-  cancel-in-progress: false
+  group: flutter-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build_web }}-${{ inputs.build_android }}-${{ inputs.include_development_tools }}
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -38,6 +46,7 @@ jobs:
       - run: flutter analyze --fatal-infos
       - run: flutter test
       - name: Prepare SQLite for web
+        if: github.event_name == 'workflow_dispatch' && (inputs.build_web || inputs.include_development_tools)
         run: |
           release=https://github.com/simolus3/drift/releases/download/drift-2.35.4
           curl --fail --location --silent --show-error "$release/sqlite3.wasm" --output web/sqlite3.wasm
@@ -48,26 +57,29 @@ jobs:
           CHECKSUMS
           )
       - name: Build the web app
+        if: github.event_name == 'workflow_dispatch' && (inputs.build_web || inputs.include_development_tools)
         env:
           INCLUDE_DEVELOPMENT_TOOLS: ${{ inputs.include_development_tools == true }}
         run: |
           flutter build web --no-web-resources-cdn \
             --dart-define=COMPANION_FOCUS_DEVELOPMENT_TOOLS="$INCLUDE_DEVELOPMENT_TOOLS"
       - name: Retain the web build
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch' && (inputs.build_web || inputs.include_development_tools)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: companion-focus-web
           path: build/web/
           if-no-files-found: error
-          retention-days: 7
-      - run: flutter build apk --debug
+          retention-days: 1
+      - name: Build the Android debug APK
+        if: github.event_name == 'workflow_dispatch' && inputs.build_android
+        run: flutter build apk --debug
       - name: Retain the Android debug build
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch' && inputs.build_android && github.event.repository.private == true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: companion-focus-android-debug
           path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 1
