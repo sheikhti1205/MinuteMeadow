@@ -1,4 +1,5 @@
 export 'animation/rig_playback.dart';
+export 'animation/state_controller.dart';
 export 'render/affine2.dart';
 export 'render/atlas_cache.dart';
 export 'render/companion_pose.dart';
@@ -8,4 +9,5 @@ export 'rig/rig_codec.dart';
 export 'rig/manifest_inspection.dart';
 export 'rig/rig_model.dart';
 export 'rig/rig_validator.dart';
+export 'scene/companion_move.dart';
 export 'scene/companion_scene.dart';

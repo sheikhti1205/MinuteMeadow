@@ -33,6 +33,15 @@ jobs:
       - run: flutter analyze --fatal-infos
       - run: flutter test
       - run: flutter build apk --debug
+      - name: Retain the Android debug build
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: companion-focus-android-debug
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - name: Prepare SQLite for web
         run: |
           release=https://github.com/simolus3/drift/releases/download/drift-2.35.4
@@ -44,3 +53,11 @@ jobs:
           CHECKSUMS
           )
       - run: flutter build web --no-web-resources-cdn
+      - name: Retain the web build
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: companion-focus-web
+          path: build/web/
+          if-no-files-found: error
+          retention-days: 7

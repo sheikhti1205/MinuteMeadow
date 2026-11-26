@@ -13,7 +13,7 @@ import 'package:integration_test/integration_test.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('Android saves focus defaults and active timer checkpoints', (tester) async {
+  testWidgets('Android reloads focus defaults and a paused timer from SQLite', (tester) async {
     final database = LocalDatabase.open();
     final container = ProviderContainer(
       overrides: [databaseProvider.overrideWithValue(database)],
@@ -71,5 +71,18 @@ void main() {
     }
     expect(snapshot?.status, FocusStatus.paused);
     expect(snapshot?.intended, const Duration(minutes: 37));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    final reopened = ProviderContainer(
+      overrides: [databaseProvider.overrideWithValue(database)],
+    );
+    addTearDown(reopened.dispose);
+    await tester.runAsync(() => reopened.read(startupProvider.future));
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: reopened,
+      child: const CompanionFocusApp(),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.descendant(of: primary, matching: find.text('Resume')), findsOneWidget);
   });
 }
