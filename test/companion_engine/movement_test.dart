@@ -3,6 +3,22 @@ import 'package:companion_focus/companion_engine/scene/companion_scene.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('advances a route across a slow display frame', () {
+    final scene = CompanionScene();
+    final destination = scene.home + const Offset(20, 0);
+    expect(scene.playRoute([
+      CompanionMove(
+        target: destination,
+        duration: const Duration(milliseconds: 400),
+      ),
+    ]), isTrue);
+
+    scene.advance(const Duration(milliseconds: 500));
+
+    expect(scene.companionTopLeft, destination);
+    expect(scene.isMoving, isFalse);
+  });
+
   test('executes an ordered walk and jump route with updated hitboxes', () {
     final scene = CompanionScene();
     final start = scene.home;

@@ -167,11 +167,10 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
     final passed = elapsed - last;
     if (widget.lowPower && passed < const Duration(milliseconds: 32)) return;
     _lastTick = elapsed;
-    final delta = passed > stage.scene.maxStep ? stage.scene.maxStep : passed;
-    stage.scene.advance(delta);
+    stage.scene.advance(passed);
     var clipCompleted = false;
     if (!_reduceMotion) {
-      for (final event in stage.animator.advance(delta.inMicroseconds / 1000)) {
+      for (final event in stage.animator.advance(passed.inMicroseconds / 1000)) {
         switch (event) {
           case RigStateMarkerEvent(:final marker):
             _playSound(marker.name);

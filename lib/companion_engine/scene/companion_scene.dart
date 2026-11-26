@@ -55,6 +55,7 @@ final class CompanionScene {
     assert(ballRadius > 0);
     assert(maxBounces >= 1);
     assert(throwFlightSeconds > 0);
+    assert(maxStep >= const Duration(milliseconds: 1));
     _position = home;
   }
 
@@ -70,8 +71,7 @@ final class CompanionScene {
   final double catchRadius;
   final Duration chaseTimeout;
 
-  /// Longest frame simulated in one step, so a background gap cannot teleport
-  /// the scene.
+  /// Longest physics step within a display frame.
   final Duration maxStep;
 
   late Offset _position;
@@ -214,11 +214,20 @@ final class CompanionScene {
 
   /// Advances movement and interaction state by [delta].
   void advance(Duration delta) {
-    final seconds = delta.inMicroseconds / Duration.microsecondsPerSecond;
-    if (seconds <= 0) return;
-    final step = math.min(seconds, maxStep.inMicroseconds / 1e6);
-    _nowMs += seconds * 1000;
+    if (delta <= Duration.zero) return;
+    _nowMs += delta.inMicroseconds / 1000;
     _advancePetting();
+    // Recover from dropped frames without simulating an entire background gap.
+    var remaining = math.min(delta.inMicroseconds, Duration.microsecondsPerSecond);
+    final stepLimit = math.max(maxStep.inMicroseconds, 1000);
+    while (remaining > 0 && (_ballPhase != BallPhase.none || isMoving)) {
+      final step = math.min(remaining, stepLimit);
+      _advanceMotion(step / Duration.microsecondsPerSecond);
+      remaining -= step;
+    }
+  }
+
+  void _advanceMotion(double step) {
     switch (_ballPhase) {
       case BallPhase.none:
         _advanceRoute(step);
