@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: flutter-ci-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -27,4 +31,14 @@ jobs:
       - run: flutter analyze --fatal-infos
       - run: flutter test
       - run: flutter build apk --debug
+      - name: Prepare SQLite for web
+        run: |
+          release=https://github.com/simolus3/drift/releases/download/drift-2.35.4
+          curl --fail --location --silent --show-error "$release/sqlite3.wasm" --output web/sqlite3.wasm
+          curl --fail --location --silent --show-error "$release/drift_worker.js" --output web/drift_worker.js
+          (cd web; sha256sum --check <<'CHECKSUMS'
+          e7451780e78c56ff864fe9317a0fbcd6aeb2e8de3beba7f5efd963202f7ec3d9  sqlite3.wasm
+          48c950cd8e3bc3cddb34816c860e228be8832bef07a297c27e9907c057ff8162  drift_worker.js
+          CHECKSUMS
+          )
       - run: flutter build web
