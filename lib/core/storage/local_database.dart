@@ -24,7 +24,7 @@ class LocalDatabase extends GeneratedDatabase {
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-    onCreate: (_) async {
+    onCreate: (_) => transaction(() async {
       await customStatement('''
         CREATE TABLE app_state (
           name TEXT PRIMARY KEY NOT NULL,
@@ -44,7 +44,7 @@ class LocalDatabase extends GeneratedDatabase {
       await customStatement('''
         CREATE INDEX focus_sessions_finished ON focus_sessions(finished_at)
       ''');
-    },
+    }),
   );
 
   Future<String?> readState(String name) async {
@@ -100,11 +100,16 @@ class LocalDatabase extends GeneratedDatabase {
 
   Future<void> replaceData(
     String settings,
-    List<SessionRecord> importedSessions,
-  ) => transaction(() async {
-    await customStatement(
-      "DELETE FROM app_state WHERE name IN ('focus', 'clock', 'settings')",
-    );
+    List<SessionRecord> importedSessions, {
+    bool clearPacks = false,
+  }) => transaction(() async {
+    if (clearPacks) {
+      await customStatement('DELETE FROM app_state');
+    } else {
+      await customStatement(
+        "DELETE FROM app_state WHERE name IN ('focus', 'clock', 'settings')",
+      );
+    }
     await customStatement('DELETE FROM focus_sessions');
     await writeState('settings', settings);
     for (final session in importedSessions) {

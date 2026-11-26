@@ -11,6 +11,7 @@ class SettingsPage extends StatefulWidget {
     required this.onSave,
     required this.onExport,
     required this.onReplace,
+    required this.onClear,
     this.notificationsAvailable = false,
     super.key,
   });
@@ -19,6 +20,7 @@ class SettingsPage extends StatefulWidget {
   final Future<void> Function(AppSettings) onSave;
   final Future<String> Function() onExport;
   final Future<void> Function(DataBackup) onReplace;
+  final Future<void> Function() onClear;
   final bool notificationsAvailable;
 
   @override
@@ -109,9 +111,9 @@ class _SettingsPageState extends State<SettingsPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Clear timer data?'),
+        title: const Text('Clear local data?'),
         content: const Text(
-          'This removes focus history and active timers and resets preferences.',
+          'This removes focus history, active timers and installed packs and resets preferences.',
         ),
         actions: [
           TextButton(
@@ -127,11 +129,8 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (confirmed == true && mounted) {
       await _run(() async {
-        await widget.onReplace(const DataBackup(
-          settings: AppSettings(),
-          sessions: [],
-        ));
-        _message('Timer data cleared.');
+        await widget.onClear();
+        _message('Local data cleared.');
       });
     }
   }
@@ -221,7 +220,7 @@ class _SettingsPageState extends State<SettingsPage> {
             const _Heading('Local data'),
             ListTile(title: const Text('Export backup'), onTap: _busy ? null : _export),
             ListTile(title: const Text('Import backup'), onTap: _busy ? null : _import),
-            ListTile(title: const Text('Clear timer data'), onTap: _busy ? null : _reset),
+            ListTile(title: const Text('Clear local data'), onTap: _busy ? null : _reset),
             const Divider(),
             const ListTile(
               title: Text(Branding.name),

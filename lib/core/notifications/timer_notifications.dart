@@ -31,6 +31,17 @@ class TimerNotifications {
         false;
   }
 
+  Future<bool> hasPermission() async {
+    if (!available) return false;
+    await _initialize();
+    return await _plugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.areNotificationsEnabled() ??
+        false;
+  }
+
   Future<void> schedule({
     required int id,
     required DateTime? deadline,

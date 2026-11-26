@@ -59,9 +59,15 @@ class AppSettings {
     'lowPower': lowPower,
   };
 
-  String encode() => jsonEncode(toJson());
+  String encode() => jsonEncode({'schema': 1, ...toJson()});
 
-  static AppSettings decode(String source) => fromJson(jsonDecode(source));
+  static AppSettings decode(String source) {
+    final Object? json = jsonDecode(source);
+    if (json case {'schema': final Object? version} when version != 1) {
+      throw const FormatException('Unsupported settings version.');
+    }
+    return fromJson(json);
+  }
 
   static AppSettings fromJson(Object? json) {
     if (json case {
