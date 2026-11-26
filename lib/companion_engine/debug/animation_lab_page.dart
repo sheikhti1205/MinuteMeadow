@@ -320,7 +320,13 @@ class _AnimationLabPageState extends State<AnimationLabPage>
           sourceLabel: _inspectionSource,
         );
       } else {
-        setState(() => _loadStatus = 'Loaded atlas ${atlas.id}');
+        final remaining = _missingAtlasIds(pending ?? candidate, cache);
+        setState(() {
+          _loadStatus = remaining.isEmpty
+              ? 'Loaded atlas ${atlas.id}'
+              : 'Loaded atlas ${atlas.id} · still need: '
+                    '${remaining.join(', ')}';
+        });
       }
     } on RigFileException catch (error) {
       _setFileError(error.message);
@@ -536,17 +542,20 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     if (_log.length > 7) _log.removeLast();
   }
 
-  String _eventLabel(CompanionSceneEventType type) => switch (type) {
-    CompanionSceneEventType.pet => 'pet',
-    CompanionSceneEventType.ballThrown => 'ball thrown',
-    CompanionSceneEventType.ballBounced => 'ball bounced',
-    CompanionSceneEventType.ballRolling => 'ball rolling',
-    CompanionSceneEventType.ballCaught => 'ball caught',
-    CompanionSceneEventType.ballReturned => 'ball returned',
-    CompanionSceneEventType.ballMissed => 'ball missed',
-    CompanionSceneEventType.movementCompleted => 'movement completed',
-    _ => type.name,
-  };
+  static const Map<CompanionSceneEventType, String> _eventLabels =
+      <CompanionSceneEventType, String>{
+        CompanionSceneEventType.pet: 'pet',
+        CompanionSceneEventType.ballThrown: 'ball thrown',
+        CompanionSceneEventType.ballBounced: 'ball bounced',
+        CompanionSceneEventType.ballRolling: 'ball rolling',
+        CompanionSceneEventType.ballCaught: 'ball caught',
+        CompanionSceneEventType.ballReturned: 'ball returned',
+        CompanionSceneEventType.ballMissed: 'ball missed',
+        CompanionSceneEventType.movementCompleted: 'movement completed',
+      };
+
+  String _eventLabel(CompanionSceneEventType type) =>
+      _eventLabels[type] ?? type.name;
 
   Affine2 _rootTransform(CompanionScene scene) {
     final rect = scene.companionRect;

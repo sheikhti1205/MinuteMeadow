@@ -207,20 +207,20 @@ void main() {
       final text = '{"schemaVersion":1}';
       final file = XFile.fromData(Uint8List.fromList(text.codeUnits));
       expect(await RigFileLoader.readManifestText(file), text);
-      expect(
-        () => RigFileLoader.readManifestText(file, maxBytes: 4),
+      await expectLater(
+        RigFileLoader.readManifestText(file, maxBytes: 4),
         throwsA(isA<RigFileException>()),
       );
     });
 
     test('rejects invalid UTF-8 and non-positive limits', () async {
       final invalid = XFile.fromData(Uint8List.fromList(<int>[0xFF]));
-      expect(
-        () => RigFileLoader.readManifestText(invalid),
+      await expectLater(
+        RigFileLoader.readManifestText(invalid),
         throwsA(isA<RigFileException>()),
       );
-      expect(
-        () => RigFileLoader.readBytes(
+      await expectLater(
+        RigFileLoader.readBytes(
           XFile.fromData(Uint8List(0)),
           maxBytes: 0,
           label: 'Atlas',

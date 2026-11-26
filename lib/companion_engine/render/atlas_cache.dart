@@ -33,17 +33,20 @@ final class AtlasCache {
   /// Decodes PNG or WebP bytes into an image the compositor can draw.
   static Future<ui.Image> decode(Uint8List bytes) async {
     final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-    final descriptor = await ui.ImageDescriptor.encoded(buffer);
     try {
-      final codec = await descriptor.instantiateCodec();
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
       try {
-        final frame = await codec.getNextFrame();
-        return frame.image;
+        final codec = await descriptor.instantiateCodec();
+        try {
+          final frame = await codec.getNextFrame();
+          return frame.image;
+        } finally {
+          codec.dispose();
+        }
       } finally {
-        codec.dispose();
+        descriptor.dispose();
       }
     } finally {
-      descriptor.dispose();
       buffer.dispose();
     }
   }
