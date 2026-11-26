@@ -155,6 +155,16 @@ void main() {
     expect(find.text('Resume'), findsOneWidget);
     expect(FocusSnapshot.tryDecode(snapshots.last)?.status, FocusStatus.paused);
 
+    final writesBeforeBackground = snapshots.length;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(snapshots, hasLength(writesBeforeBackground));
+
     await tester.tap(find.text('Resume'));
     await tester.pump();
     expect(find.text('Focusing'), findsOneWidget);

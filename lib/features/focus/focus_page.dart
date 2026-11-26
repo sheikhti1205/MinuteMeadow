@@ -112,7 +112,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
       unawaited(_resumeFromBackground());
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
-      _persist();
+      if (_engine.isRunning) _persist();
       _stopTicker();
     }
   }
