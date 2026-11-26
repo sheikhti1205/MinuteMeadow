@@ -1,5 +1,3 @@
-import 'dart:ui' show Offset;
-
 import 'package:companion_focus/companion_engine/scene/companion_move.dart';
 import 'package:companion_focus/companion_engine/scene/companion_scene.dart';
 import 'package:flutter_test/flutter_test.dart';

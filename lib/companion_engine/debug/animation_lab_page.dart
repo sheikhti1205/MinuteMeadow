@@ -12,6 +12,7 @@ import '../render/sprite_painter.dart';
 import '../rig/manifest_inspection.dart';
 import '../rig/rig_codec.dart';
 import '../rig/rig_model.dart';
+import '../scene/companion_move.dart';
 import '../scene/companion_scene.dart';
 import 'geometric_rig.dart';
 import 'rig_file_loader.dart';
@@ -433,12 +434,21 @@ class _AnimationLabPageState extends State<AnimationLabPage>
     }
     _wasPetting = petting;
 
-    final walking =
-        scene.motion == CompanionMotion.chasing ||
-        scene.motion == CompanionMotion.returning;
-    if (_clipId != 'walk' && playback.rig.clipById('walk') != null) {
-      if (walking && !playback.isPlaying('walk')) playback.play('walk');
-      if (!walking && playback.isPlaying('walk')) playback.stop('walk');
+    final motionClip = switch (scene.motion) {
+      CompanionMotion.walking ||
+      CompanionMotion.chasing ||
+      CompanionMotion.returning => 'walk',
+      CompanionMotion.running => 'run',
+      CompanionMotion.jumping => 'jump',
+      CompanionMotion.idle || CompanionMotion.petting => null,
+    };
+    for (final id in const ['walk', 'run', 'jump']) {
+      if (id == _clipId || playback.rig.clipById(id) == null) continue;
+      if (id == motionClip) {
+        if (!playback.isPlaying(id)) playback.play(id);
+      } else if (playback.isPlaying(id)) {
+        playback.stop(id);
+      }
     }
   }
 
@@ -498,6 +508,36 @@ class _AnimationLabPageState extends State<AnimationLabPage>
       _logLine(_eventLabel(event.type));
     }
     setState(() {});
+  }
+
+  void _runMovementRoute() {
+    final scene = _scene;
+    if (scene == null) return;
+    final home = scene.home;
+    final right = scene.field.width - scene.companionSize.width;
+    if (!scene.playRoute([
+      CompanionMove(
+        target: Offset(right * 0.2, home.dy),
+        duration: const Duration(milliseconds: 550),
+      ),
+      CompanionMove(
+        target: Offset(right * 0.8, home.dy),
+        duration: const Duration(milliseconds: 400),
+        gait: CompanionGait.run,
+      ),
+      CompanionMove(
+        target: home,
+        duration: const Duration(milliseconds: 420),
+        gait: CompanionGait.jump,
+      ),
+    ])) {
+      return;
+    }
+    if (_playing) {
+      setState(() {});
+    } else {
+      _setPlaying(true);
+    }
   }
 
   Offset _toScene(Offset local) {
@@ -800,6 +840,12 @@ class _AnimationLabPageState extends State<AnimationLabPage>
                 ActionChip(
                   label: const Text('Throw'),
                   onPressed: _throwDefault,
+                ),
+                ActionChip(
+                  label: const Text('Run route'),
+                  onPressed: scene.ballPhase == BallPhase.none && !scene.isMoving
+                      ? _runMovementRoute
+                      : null,
                 ),
                 ActionChip(label: const Text('Reset'), onPressed: _reset),
                 ActionChip(
