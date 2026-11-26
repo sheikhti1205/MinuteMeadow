@@ -9,9 +9,10 @@ class PackArchive {
   static final _component = RegExp(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$');
 
   static Map<String, Uint8List> read(Uint8List bytes) {
-    if (bytes.isEmpty || bytes.length > maximumBytes) {
+    if (bytes.length < 22 || bytes.length > maximumBytes) {
       throw const FormatException('Pack archive is empty or too large.');
     }
+    _checkDirectoryBounds(bytes);
 
     final directory = ZipDirectory();
     try {
@@ -96,5 +97,32 @@ class PackArchive {
       throw const FormatException('Could not read the pack archive.');
     }
     return Map.unmodifiable(contents);
+  }
+
+  static void _checkDirectoryBounds(Uint8List bytes) {
+    final data = ByteData.sublistView(bytes);
+    if (data.getUint32(0, Endian.little) != 0x04034b50) {
+      throw const FormatException('Expected a ZIP archive.');
+    }
+    final first = (bytes.length - 65557).clamp(0, bytes.length);
+    for (var end = bytes.length - 22; end >= first; end--) {
+      if (data.getUint32(end, Endian.little) != 0x06054b50 ||
+          end + 22 + data.getUint16(end + 20, Endian.little) != bytes.length) {
+        continue;
+      }
+      final entries = data.getUint16(end + 10, Endian.little);
+      final length = data.getUint32(end + 12, Endian.little);
+      final offset = data.getUint32(end + 16, Endian.little);
+      if (data.getUint32(end + 4, Endian.little) != 0 ||
+          data.getUint16(end + 8, Endian.little) != entries ||
+          entries < 1 ||
+          entries > maximumEntries ||
+          length > maximumEntries * 512 ||
+          offset + length != end) {
+        break;
+      }
+      return;
+    }
+    throw const FormatException('Invalid or oversized ZIP directory.');
   }
 }

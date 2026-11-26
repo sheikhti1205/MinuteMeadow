@@ -13,6 +13,7 @@ class SettingsPage extends StatefulWidget {
     required this.onReplace,
     required this.onClear,
     this.notificationsAvailable = false,
+    this.animationLab,
     super.key,
   });
 
@@ -22,6 +23,7 @@ class SettingsPage extends StatefulWidget {
   final Future<void> Function(DataBackup) onReplace;
   final Future<void> Function() onClear;
   final bool notificationsAvailable;
+  final WidgetBuilder? animationLab;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -216,6 +218,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 () => widget.onSave(settings.copyWith(reducedMotion: value)),
               ),
             ),
+            SwitchListTile(
+              title: const Text('Low-power animation'),
+              subtitle: const Text('Draw companion animation less often.'),
+              value: settings.lowPower,
+              onChanged: _busy ? null : (value) => _run(
+                () => widget.onSave(settings.copyWith(lowPower: value)),
+              ),
+            ),
             const Divider(),
             const _Heading('Local data'),
             ListTile(title: const Text('Export backup'), onTap: _busy ? null : _export),
@@ -226,6 +236,13 @@ class _SettingsPageState extends State<SettingsPage> {
               title: Text(Branding.name),
               subtitle: Text('Version ${Branding.version}'),
             ),
+            if (widget.animationLab case final animationLab?)
+              ListTile(
+                title: const Text('Animation laboratory'),
+                onTap: () => Navigator.of(context).push<void>(
+                  MaterialPageRoute(builder: animationLab),
+                ),
+              ),
           ],
         ),
       ),

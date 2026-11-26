@@ -1,0 +1,37 @@
+{
+  "schema": "companion.pack/1",
+  "id": "your-name.pack-name",
+  "version": "0.1.0",
+  "name": "Pack name",
+  "author": "Asset author",
+  "description": "Describe the companion and any interactions it supports.",
+  "license": "License identifier",
+  "attribution": "Creator, source and any required attribution",
+  "application": {"minVersion": "0.1.0"},
+  "preview": "preview.png",
+  "canvas": {"width": 48, "height": 48},
+  "palette": ["#362820", "#D5A980"],
+  "layers": [{"id": "body", "z": 0}],
+  "clips": [
+    {
+      "id": "idle",
+      "fps": 4,
+      "loop": true,
+      "frames": [
+        {"layer": "body", "asset": "sprites/atlas.png", "rect": {"x": 0, "y": 0, "w": 48, "h": 48}}
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "path": "preview.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": 1
+    },
+    {
+      "path": "sprites/atlas.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": 1
+    }
+  ]
+}

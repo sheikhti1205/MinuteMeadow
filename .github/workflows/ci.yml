@@ -28,6 +28,12 @@ jobs:
       - name: Prepare platform runners
         run: flutter create --empty --no-pub --platforms=android,web --org=app.companionfocus --project-name=companion_focus .
       - run: flutter pub get
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-lock
+          path: pubspec.lock
+          if-no-files-found: error
+          retention-days: 3
       - run: flutter analyze --fatal-infos
       - run: flutter test
       - run: flutter build apk --debug
@@ -41,4 +47,4 @@ jobs:
           48c950cd8e3bc3cddb34816c860e228be8832bef07a297c27e9907c057ff8162  drift_worker.js
           CHECKSUMS
           )
-      - run: flutter build web
+      - run: flutter build web --no-web-resources-cdn

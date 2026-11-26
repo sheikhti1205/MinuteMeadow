@@ -1,6 +1,6 @@
 # Companion Focus
 
-Companion Focus is an Android app in early development. The current build opens a themed startup screen. The first release will combine a focus timer, stopwatch, session history, and installable pixel-art companion packs.
+Companion Focus is an Android app for focus sessions, breaks, stopwatch laps and countdowns. It stores settings and session history on the device. You can import and manage companion packs without an account. The bundled catalogue is empty during development.
 
 ## Build
 
@@ -12,6 +12,6 @@ flutter pub get
 flutter run
 ```
 
-GitHub Actions runs static analysis, tests, and Android and web builds. No app binaries have been released.
+GitHub Actions runs static analysis, tests, and Android and web builds. The separate Android integration workflow runs on an emulator. No app binaries have been released.
 
 See the [roadmap](ROADMAP.md) for planned features. A distribution license has not been selected.

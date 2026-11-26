@@ -1,9 +1,13 @@
 # Companion packs
 
-The pack format is under development. Until a schema and validator ship together, there is no supported import format.
+Companion Focus imports ZIP archives and JSON envelopes. Both formats use the same manifest and verify the same declared assets.
 
-A pack contains `manifest.json`, a PNG preview, a `LICENSE` file, sprite images and animation data. Sound assets are optional. Packs contain no scripts, binaries or runtime extensions.
+A ZIP contains `manifest.json`, a PNG preview, a `LICENSE` file and PNG sprite assets. Keep `manifest.json` at the archive root. A JSON envelope has `schema: "companion.bundle/1"`, a `manifest` object and an `assets` object that maps each asset path to its padded Base64 bytes. Packs contain no scripts or runtime extensions. Version 1 pack assets are PNGs.
 
-The manifest identifies the pack, its release version, author, attribution, license, supported application and schema versions, canvas size, palette, layers, clips and referenced files. Every referenced asset has a content hash. Relative asset paths must point inside the pack, and declared frame regions must fit their source images.
+The [`companion.pack/1` manifest](companion/manifest.schema.json) names the pack, version, author, license, preview, canvas, palette, layers, clips and assets. Use a lowercase dotted pack ID and `MAJOR.MINOR.PATCH` versions. Set `application.minVersion` if the pack requires a particular app version. `description`, `attribution` and `homepage` are available for publication details.
 
-The importer will reject unsupported schemas, missing or invalid references, corrupt or excessive assets, malformed archives and unsafe paths before an installed version changes. See [marketplace architecture](MARKETPLACE_ARCHITECTURE.md) for the install boundary.
+Give each layer a distinct draw order (`z`). A clip defines a frame rate, whether it loops, and ordered frame references. Frame rectangles are in source atlas pixels. A clip named `idle`, when present, plays by default. `focus`, `break`, `pet` and `catch` are optional contextual clips.
+
+Each asset has a relative path, byte length and lowercase SHA-256 digest. Frame regions must fit their images, and the preview must be declared as an asset. The validator rejects unsupported schemas, corrupt archives, unsafe paths and unexpected files before changing the library.
+
+See the [pack creation guide](PACK_CREATION_GUIDE.md) for an editable manifest and validation command.

@@ -9,3 +9,5 @@ Companion Focus is in development. Contributions can cover Flutter code, Android
 - Report security problems privately. See [SECURITY.md](SECURITY.md).
 
 See [README.md](README.md) for the toolchain and [ROADMAP.md](ROADMAP.md) for planned work. A distribution license has not been selected.
+
+For pack contributions, see [asset licensing](docs/ASSET_LICENSING.md) and the [pack format](docs/COMPANION_PACK_SPEC.md).
