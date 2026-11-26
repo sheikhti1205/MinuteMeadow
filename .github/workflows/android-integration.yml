@@ -27,6 +27,11 @@ jobs:
           flutter create --empty --no-pub --platforms=android --org=app.companionfocus --project-name=companion_focus .
           git show HEAD:pubspec.lock > pubspec.lock
       - run: flutter pub get --enforce-lockfile
+      - name: Free space for the Android emulator and debug build
+        run: |
+          df -h "$RUNNER_TEMP"
+          sudo rm -rf -- /usr/local/share/dotnet /opt/ghc
+          df -h "$RUNNER_TEMP"
       - name: Allow Android emulator access to KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
