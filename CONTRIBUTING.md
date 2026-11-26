@@ -1,6 +1,6 @@
 # Contributing
 
-Companion Focus is in development. Contributions can cover Flutter code, Android behavior, documentation, accessibility, or companion-pack design. Discuss companion artwork before making a pack; the first pack follows the non-art beta.
+MinuteMeadow is in development. Contributions can cover Flutter code, Android behavior, documentation, accessibility, or companion-pack design. Discuss companion artwork before making a pack; the first pack follows the non-art beta.
 
 - Keep pull requests focused on one change.
 - Fix shared behavior in the module that owns it.

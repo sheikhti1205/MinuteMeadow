@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,6 +15,8 @@ import '../core/time/timer_checkpoint.dart';
 import '../design/companion_theme.dart';
 import '../features/clock/clock_page.dart';
 import '../features/companion/companion_page.dart';
+import '../features/companion/companion_scope.dart';
+import '../features/companion/companion_session.dart';
 import '../features/focus/focus_page.dart';
 import '../features/insights/insights_page.dart';
 import '../features/marketplace/marketplace_page.dart';
@@ -56,22 +58,37 @@ class CompanionFocusApp extends ConsumerWidget {
   }
 }
 
-MaterialApp _app(Widget home, {AppSettings settings = const AppSettings()}) =>
-    MaterialApp(
-      title: Branding.name,
-      theme: CompanionTheme.light,
-      darkTheme: CompanionTheme.dark,
-      themeMode: settings.themeMode,
-      builder: (context, child) {
-        if (!settings.reducedMotion) return child!;
-        final media = MediaQuery.of(context);
-        return MediaQuery(
-          data: media.copyWith(disableAnimations: true, accessibleNavigation: true),
-          child: child!,
-        );
-      },
-      home: home,
-    );
+MaterialApp _app(
+  Widget home, {
+  AppSettings settings = const AppSettings(),
+  CompanionSession? companionSession,
+  RouteObserver<ModalRoute<dynamic>>? routeObserver,
+}) => MaterialApp(
+  title: Branding.name,
+  theme: CompanionTheme.light,
+  darkTheme: CompanionTheme.dark,
+  themeMode: settings.themeMode,
+  navigatorObservers: [if (routeObserver != null) routeObserver],
+  builder: (context, child) {
+    Widget content = child!;
+    if (settings.reducedMotion) {
+      final media = MediaQuery.of(context);
+      content = MediaQuery(
+        data: media.copyWith(
+          disableAnimations: true,
+          accessibleNavigation: true,
+        ),
+        child: content,
+      );
+    }
+    final session = companionSession;
+    if (session == null) return content;
+    // Above the navigator so every route, including settings and marketplace,
+    // shares the one authoritative library.
+    return CompanionSessionScope(session: session, child: content);
+  },
+  home: home,
+);
 
 class _LaunchScreen extends StatelessWidget {
   const _LaunchScreen({required this.child});
@@ -106,9 +123,12 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
   late final _settings = ValueNotifier(widget.data.settings);
   late final _focusSettings = ValueNotifier(_focusDefaults(widget.data.settings));
   final _companionClip = ValueNotifier<String?>(null);
+  final _immersive = ValueNotifier<bool>(false);
   final _elapsedClock = SuspendAwareClock();
   late final _focusClock = _AppFocusClock(_elapsedClock);
   late final _clockProcessToken = DateTime.now().microsecondsSinceEpoch.toString();
+  late final _routeObserver = RouteObserver<ModalRoute<dynamic>>();
+  late CompanionSession _companionSession;
   late List<SessionRecord> _sessions = widget.data.sessions;
   late String? _focus = widget.data.focus;
   late String? _clock = widget.data.clock;
@@ -125,6 +145,7 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _companionSession = _newCompanionSession(widget.data.companion);
   }
 
   @override
@@ -144,6 +165,8 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
     _settings.dispose();
     _focusSettings.dispose();
     _companionClip.dispose();
+    _immersive.dispose();
+    _companionSession.dispose();
     super.dispose();
   }
 
@@ -152,6 +175,16 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
     shortBreakMinutes: settings.shortBreakMinutes,
     longBreakMinutes: settings.longBreakMinutes,
   );
+
+  CompanionSession _newCompanionSession(String? snapshot) {
+    // Capture the generation so a write still in flight from a replaced
+    // session cannot commit after a reset has cleared the library.
+    final generation = _packGeneration;
+    return CompanionSession(
+      initialSnapshot: snapshot,
+      onSnapshot: (payload) => _savePacks(generation, payload),
+    );
+  }
 
   Future<void> _write(Future<void> Function() operation) {
     final pending = _writes.then((_) => operation());
@@ -232,6 +265,7 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
     );
     final records = await widget.database.sessions();
     if (!mounted) return;
+    final previousSession = clearPacks ? _companionSession : null;
     setState(() {
       _timerGeneration++;
       _focus = null;
@@ -242,12 +276,17 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
       if (clearPacks) {
         _packGeneration++;
         _companion = null;
+        _companionSession = _newCompanionSession(null);
       }
     });
     _applySettings(settings);
     _companionClip.value = null;
     await _setAlarm(TimerNotifications.focusId, null, '', settings);
     await _setAlarm(TimerNotifications.countdownId, null, '', settings);
+    if (previousSession != null) {
+      // Widgets detach from the replaced notifier during this rebuild.
+      WidgetsBinding.instance.addPostFrameCallback((_) => previousSession.dispose());
+    }
   });
 
   Future<void> _saveTimer(int generation, String name, String payload) {
@@ -265,11 +304,6 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
       _companion = payload;
     }
   });
-
-  Future<void> _saveDevelopmentPacks(String payload) async {
-    await _savePacks(_packGeneration, payload);
-    if (mounted) setState(() => _packGeneration++);
-  }
 
   Future<void> _record(int generation, FocusOutcome outcome, String snapshot) =>
       _write(() async {
@@ -345,6 +379,58 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
     }
   }
 
+  /// Draws the one shared companion stage used by Focus and Companion.
+  ///
+  /// The library's first pack by id wins, so every surface agrees and the
+  /// choice is stable across rebuilds. Installing, updating or removing a pack
+  /// notifies the session and swaps the stage under a new pack/version key.
+  Widget _sharedStage(
+    BuildContext context, {
+    required double stageHeight,
+    required bool showInteractionControls,
+  }) {
+    return AnimatedBuilder(
+      animation: _companionSession,
+      builder: (context, _) {
+        final packs = _companionSession.library.packs;
+        final pack = packs.isEmpty ? null : packs.first;
+        final useDevelopmentFixture = pack == null && _showDevelopmentTools;
+        final key = pack != null
+            ? ValueKey(('companion-stage', pack.id, pack.version))
+            : useDevelopmentFixture
+            ? const ValueKey('companion-stage-development')
+            : const ValueKey('companion-stage-empty');
+        return InstalledCompanionView(
+          key: key,
+          pack: pack,
+          useDevelopmentFixture: useDevelopmentFixture,
+          stageHeight: stageHeight,
+          showInteractionControls: showInteractionControls,
+          lowPower: _settings.value.lowPower,
+          sound: _settings.value.sound,
+          ambientClip: _companionClip,
+        );
+      },
+    );
+  }
+
+  Widget _focusCompanionStage(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final extent = constraints.biggest.shortestSide;
+        final available = extent.isFinite && extent > 0 ? extent : 200.0;
+        return _sharedStage(
+          context,
+          stageHeight: available,
+          showInteractionControls: false,
+        );
+      },
+    );
+  }
+
+  Widget _companionDestinationStage(BuildContext context) =>
+      _sharedStage(context, stageHeight: 220, showInteractionControls: true);
+
   @override
   Widget build(BuildContext context) {
     final generation = _timerGeneration;
@@ -353,13 +439,18 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
       valueListenable: _settings,
       builder: (context, settings, _) => _app(
         AppShell(
-          focus: FocusPage(
+          immersive: _immersive,
+          routeObserver: _routeObserver,
+          focusBuilder: (openSettings) => FocusPage(
             key: ValueKey(('focus', generation)),
             settings: _focusSettings,
             initialSnapshot: _focus,
             recoveryNow: widget.data.focusRecoveryNow,
             clock: _focusClock,
             resumeClock: _elapsedClock.resume,
+            companionStageBuilder: _focusCompanionStage,
+            onImmersiveChanged: (value) => _immersive.value = value,
+            onConfigureTimers: openSettings,
             onSnapshot: (payload) => _saveTimer(generation, 'focus', payload),
             onOutcome: (outcome, snapshot) => _record(generation, outcome, snapshot),
             onTimelineChanged: (deadline, phase) => unawaited(_updateAlarm(
@@ -395,9 +486,13 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
             key: ValueKey(('companion', packGeneration)),
             initialSnapshot: _companion,
             onSnapshot: (payload) => _savePacks(packGeneration, payload),
+            stageBuilder: _companionDestinationStage,
             previewBuilder: (context, pack) => InstalledCompanionView(
-              key: ValueKey((pack.id, pack.version)),
+              key: ValueKey(('companion-preview', pack.id, pack.version)),
               pack: pack,
+              useDevelopmentFixture: false,
+              stageHeight: 240,
+              showInteractionControls: true,
               lowPower: _settings.value.lowPower,
               sound: _settings.value.sound,
               ambientClip: _companionClip,
@@ -415,16 +510,20 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
             ),
             notificationsAvailable: TimerNotifications.available,
             animationLab: _showDevelopmentTools ? (_) => const AnimationLabPage() : null,
+            // The marketplace resolves the shared session from the scope, so a
+            // reset before opening it is always reflected.
             developmentPacks: _showDevelopmentTools
                 ? (_) => MarketplacePage(
                     initialSnapshot: _companion,
-                    onSnapshot: _saveDevelopmentPacks,
+                    onSnapshot: (payload) => _savePacks(_packGeneration, payload),
                     repository: const DevelopmentCatalogueRepository(),
                   )
                 : null,
           ),
         ),
         settings: settings,
+        companionSession: _companionSession,
+        routeObserver: _routeObserver,
       ),
     );
   }
@@ -444,75 +543,160 @@ class _AppFocusClock implements FocusClock {
 
 class AppShell extends StatefulWidget {
   const AppShell({
-    required this.focus,
+    required this.focusBuilder,
     required this.clock,
     required this.companion,
     required this.insights,
     required this.settings,
+    required this.immersive,
+    required this.routeObserver,
     super.key,
   });
 
-  final Widget focus;
+  final Widget Function(VoidCallback openSettings) focusBuilder;
   final Widget clock;
   final Widget companion;
   final Widget insights;
   final Widget settings;
+  final ValueListenable<bool> immersive;
+  final RouteObserver<ModalRoute<dynamic>> routeObserver;
 
   @override
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with RouteAware {
   int _selected = 0;
+  bool _routeVisible = true;
+  ModalRoute<dynamic>? _route;
   static const _titles = ['Focus', 'Clock', 'Companion', 'Insights'];
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text(_selected == 0 ? Branding.name : _titles[_selected]),
-      actions: [
-        IconButton(
-          tooltip: 'Settings',
-          icon: const Icon(Icons.settings_outlined),
-          onPressed: () => Navigator.of(context).push<void>(
-            MaterialPageRoute(builder: (_) => widget.settings),
-          ),
-        ),
-      ],
-    ),
-    body: SafeArea(
-      top: false,
-      bottom: false,
-      child: IndexedStack(
-        index: _selected,
-        children: [widget.focus, widget.clock, widget.companion, widget.insights],
-      ),
-    ),
-    bottomNavigationBar: NavigationBar(
-      selectedIndex: _selected,
-      onDestinationSelected: (index) => setState(() => _selected = index),
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.hourglass_empty),
-          selectedIcon: Icon(Icons.hourglass_full),
-          label: 'Focus',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.schedule_outlined),
-          selectedIcon: Icon(Icons.watch_later),
-          label: 'Clock',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.inventory_2_outlined),
-          selectedIcon: Icon(Icons.inventory_2),
-          label: 'Companion',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.bar_chart_outlined),
-          selectedIcon: Icon(Icons.bar_chart),
-          label: 'Insights',
-        ),
-      ],
-    ),
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of<dynamic>(context);
+    if (route != _route) {
+      if (_route != null) widget.routeObserver.unsubscribe(this);
+      _route = route;
+      if (route != null) {
+        widget.routeObserver.subscribe(this, route);
+        _routeVisible = route.isCurrent;
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AppShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.routeObserver != widget.routeObserver) {
+      oldWidget.routeObserver.unsubscribe(this);
+      final route = _route;
+      if (route != null) widget.routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void didPushNext() {
+    if (_routeVisible) setState(() => _routeVisible = false);
+  }
+
+  @override
+  void didPopNext() {
+    if (!_routeVisible) setState(() => _routeVisible = true);
+  }
+
+  @override
+  void dispose() {
+    widget.routeObserver.unsubscribe(this);
+    super.dispose();
+  }
+
+  Widget _tab(int index, Widget child) => TickerMode(
+    key: ValueKey('tab-ticker-$index'),
+    enabled: _selected == index && _routeVisible,
+    child: child,
   );
+
+  /// The one settings route for the shell. The AppBar and the Focus timer
+  /// configuration link both push this route from the Navigator below
+  /// MaterialApp, so returning lands on the same tab and no second editor
+  /// exists.
+  void _openSettings() {
+    Navigator.of(context).push<void>(
+      MaterialPageRoute(builder: (_) => widget.settings),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: widget.immersive,
+      builder: (context, immersive, _) {
+        final showChrome = !immersive;
+        return PopScope(
+          // A running or paused session must not be ended by the system back
+          // gesture; quitting stays an explicit, confirmable action.
+          canPop: showChrome,
+          child: Scaffold(
+            appBar: showChrome
+                ? AppBar(
+                    title: Text(
+                      _selected == 0 ? Branding.name : _titles[_selected],
+                    ),
+                    actions: [
+                      IconButton(
+                        tooltip: 'Settings',
+                        icon: const Icon(Icons.settings_outlined),
+                        onPressed: _openSettings,
+                      ),
+                    ],
+                  )
+                : null,
+            body: SafeArea(
+              top: false,
+              bottom: false,
+              child: IndexedStack(
+                index: _selected,
+                children: [
+                  _tab(0, widget.focusBuilder(_openSettings)),
+                  _tab(1, widget.clock),
+                  _tab(2, widget.companion),
+                  _tab(3, widget.insights),
+                ],
+              ),
+            ),
+            bottomNavigationBar: showChrome
+                ? NavigationBar(
+                    selectedIndex: _selected,
+                    onDestinationSelected: (index) =>
+                        setState(() => _selected = index),
+                    destinations: const [
+                      NavigationDestination(
+                        icon: Icon(Icons.hourglass_empty),
+                        selectedIcon: Icon(Icons.hourglass_full),
+                        label: 'Focus',
+                      ),
+                      NavigationDestination(
+                        icon: Icon(Icons.schedule_outlined),
+                        selectedIcon: Icon(Icons.watch_later),
+                        label: 'Clock',
+                      ),
+                      NavigationDestination(
+                        icon: Icon(Icons.inventory_2_outlined),
+                        selectedIcon: Icon(Icons.inventory_2),
+                        label: 'Companion',
+                      ),
+                      NavigationDestination(
+                        icon: Icon(Icons.bar_chart_outlined),
+                        selectedIcon: Icon(Icons.bar_chart),
+                        label: 'Insights',
+                      ),
+                    ],
+                  )
+                : null,
+          ),
+        );
+      },
+    );
+  }
 }

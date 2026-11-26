@@ -71,7 +71,7 @@ class CompanionSession extends ChangeNotifier {
     final manifest = bundle.manifest;
     if (!manifest.isCompatibleWith(Branding.version)) {
       throw FormatException(
-        '${manifest.name} needs Companion Focus ${manifest.minimumAppVersion} or newer.',
+        '${manifest.name} needs ${Branding.name} ${manifest.minimumAppVersion} or newer.',
       );
     }
     return (

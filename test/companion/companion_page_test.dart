@@ -8,14 +8,26 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'pack_fixture.dart';
 
-Widget host(Widget child, {CompanionCatalogue? catalogue}) => MaterialApp(
-  theme: CompanionTheme.light,
-  home: Scaffold(
-    body: catalogue == null
-        ? child
-        : CompanionCatalogueScope(catalogue: catalogue, child: child),
-  ),
-);
+Widget host(
+  Widget child, {
+  CompanionCatalogue? catalogue,
+  double? textScale,
+}) {
+  final content = catalogue == null
+      ? child
+      : CompanionCatalogueScope(catalogue: catalogue, child: child);
+  final body = textScale == null
+      ? content
+      : Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              textScaler: TextScaler.linear(textScale),
+            ),
+            child: content,
+          ),
+        );
+  return MaterialApp(theme: CompanionTheme.light, home: Scaffold(body: body));
+}
 
 String snapshotWith(String name) =>
     CompanionLibrary.empty.install(installedFixture(name: name)).encode();
@@ -30,6 +42,10 @@ void main() {
     );
 
     expect(find.text('No companions installed'), findsOneWidget);
+    expect(
+      find.textContaining('No marketplace packs are listed yet'),
+      findsOneWidget,
+    );
     expect(find.text('Browse marketplace'), findsOneWidget);
     expect(find.byTooltip('Import pack'), findsOneWidget);
     expect(find.byTooltip('Marketplace'), findsNothing);
@@ -199,5 +215,108 @@ void main() {
     await tester.tap(find.byTooltip('Dismiss'));
     await tester.pump();
     expect(find.textContaining('Unsupported companion library version'), findsNothing);
+  });
+
+  testWidgets('renders the supplied stage above the installed library', (tester) async {
+    await tester.pumpWidget(
+      host(
+        CompanionPage(
+          initialSnapshot: snapshotWith('Moss Cat'),
+          onSnapshot: (_) async {},
+          stageBuilder: (context) => const SizedBox(
+            height: 160,
+            child: Center(child: Text('companion stage')),
+          ),
+        ),
+        catalogue: CompanionCatalogue.empty,
+      ),
+    );
+
+    expect(find.text('companion stage'), findsOneWidget);
+    expect(find.text('Moss Cat'), findsOneWidget);
+    expect(find.byTooltip('Marketplace'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('companion stage')).dy,
+      lessThan(tester.getTopLeft(find.text('Moss Cat')).dy),
+    );
+  });
+
+  testWidgets('keeps the intentional empty library below the stage', (tester) async {
+    await tester.pumpWidget(
+      host(
+        CompanionPage(
+          initialSnapshot: null,
+          onSnapshot: (_) async {},
+          stageBuilder: (context) => const Text('companion stage'),
+        ),
+        catalogue: CompanionCatalogue.empty,
+      ),
+    );
+
+    expect(find.text('companion stage'), findsOneWidget);
+    expect(find.text('No companions installed'), findsOneWidget);
+    expect(
+      find.textContaining('No marketplace packs are listed yet'),
+      findsOneWidget,
+    );
+    expect(find.text('Browse marketplace'), findsOneWidget);
+    expect(find.byTooltip('Marketplace'), findsNothing);
+  });
+
+  testWidgets('keeps the empty library usable at large text', (tester) async {
+    tester.view.physicalSize = const Size(320, 480);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      host(
+        CompanionPage(
+          initialSnapshot: null,
+          onSnapshot: (_) async {},
+          stageBuilder: (context) => const SizedBox(
+            height: 220,
+            child: Center(child: Text('companion stage')),
+          ),
+        ),
+        catalogue: CompanionCatalogue.empty,
+        textScale: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+
+    await tester.scrollUntilVisible(find.text('Browse marketplace'), 80);
+    expect(find.text('Browse marketplace'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scrolls with the stage at portrait width and large text', (tester) async {
+    tester.view.physicalSize = const Size(320, 480);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      host(
+        CompanionPage(
+          initialSnapshot: snapshotWith('Moss Cat'),
+          onSnapshot: (_) async {},
+          stageBuilder: (context) => const SizedBox(
+            height: 220,
+            child: Center(child: Text('companion stage')),
+          ),
+        ),
+        catalogue: CompanionCatalogue.empty,
+        textScale: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('companion stage'), findsOneWidget);
+
+    await tester.scrollUntilVisible(find.text('Moss Cat'), 80);
+    expect(find.text('Moss Cat'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

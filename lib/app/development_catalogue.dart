@@ -64,7 +64,7 @@ class DevelopmentCatalogueRepository implements CompanionCatalogueRepository {
       'id': 'dev.companion.$id',
       'version': '1.0.0',
       'name': '$name (test)',
-      'author': 'Companion Focus',
+      'author': 'MinuteMeadow',
       'description': 'Geometric development fixture for pack and animation checks.',
       'license': 'Development use only',
       'preview': 'preview.png',

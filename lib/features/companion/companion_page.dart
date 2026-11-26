@@ -22,12 +22,19 @@ class CompanionPage extends StatefulWidget {
   const CompanionPage({
     required this.initialSnapshot,
     required this.onSnapshot,
+    this.stageBuilder,
     this.previewBuilder,
     super.key,
   });
 
   final String? initialSnapshot;
   final Future<void> Function(String) onSnapshot;
+
+  /// Draws the companion stage above the installed library.
+  ///
+  /// The shell supplies the shared runtime stage here, including petting and
+  /// ball play. Without one the page shows only the installed library.
+  final WidgetBuilder? stageBuilder;
 
   /// Draws the installed companion in the library detail.
   ///
@@ -200,73 +207,90 @@ class _CompanionPageState extends State<CompanionPage> {
       builder: (context, _) {
         final session = _session!;
         final library = session.library;
-        final catalogue = _catalogue?.catalogue ?? CompanionCatalogue.empty;
+        final controller = _catalogue;
+        final catalogue = controller?.catalogue ?? CompanionCatalogue.empty;
+        final catalogueEmpty =
+            catalogue.isEmpty &&
+            controller?.error == null &&
+            !(controller?.loading ?? false);
         final notice = _libraryNotice(session);
         final theme = Theme.of(context);
+        final stageBuilder = widget.stageBuilder;
         return Column(
           children: [
             if (session.busy) const LinearProgressIndicator(minHeight: 2),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 8, 0),
-              child: Row(
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.only(bottom: 24),
                 children: [
-                  Expanded(
-                    child: Text(
-                      'Installed',
-                      style: theme.textTheme.titleSmall,
+                  if (stageBuilder != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                      child: stageBuilder(context),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 8, 0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Installed',
+                            style: theme.textTheme.titleSmall,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.add),
+                          tooltip: 'Import pack',
+                          onPressed: session.busy ? null : _showImportOptions,
+                        ),
+                        if (!library.isEmpty)
+                          IconButton(
+                            icon: const Icon(Icons.storefront_outlined),
+                            tooltip: 'Marketplace',
+                            onPressed: session.busy ? null : _openMarketplace,
+                          ),
+                      ],
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.add),
-                    tooltip: 'Import pack',
-                    onPressed: session.busy ? null : _showImportOptions,
-                  ),
-                  if (!library.isEmpty)
-                    IconButton(
-                      icon: const Icon(Icons.storefront_outlined),
-                      tooltip: 'Marketplace',
-                      onPressed: session.busy ? null : _openMarketplace,
+                  if (notice != null)
+                    _LibraryNotice(
+                      message: notice,
+                      onDismiss: session.dismissLoadNotice,
                     ),
+                  if (library.isEmpty)
+                    _LibraryEmpty(
+                      onBrowse: _openMarketplace,
+                      catalogueEmpty: catalogueEmpty,
+                    )
+                  else
+                    for (final pack in library.packs) _packTile(pack, catalogue),
                 ],
               ),
-            ),
-            if (notice != null)
-              _LibraryNotice(
-                message: notice,
-                onDismiss: session.dismissLoadNotice,
-              ),
-            Expanded(
-              child: library.isEmpty
-                  ? _LibraryEmpty(onBrowse: _openMarketplace)
-                  : ListView.builder(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      itemCount: library.packs.length,
-                      itemBuilder: (context, index) {
-                        final pack = library.packs[index];
-                        final latest = catalogue.latestFor(pack.id);
-                        final update = latest != null &&
-                            comparePackVersions(latest.version, pack.version) > 0;
-                        return ListTile(
-                          leading: _PackPreview(pack: pack, size: 48),
-                          title: Text(
-                            pack.manifest.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            'v${pack.version} · ${pack.manifest.author}'
-                            '${update ? ' · Update available' : ''}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          onTap: () => _openPack(pack, catalogue),
-                        );
-                      },
-                    ),
             ),
           ],
         );
       },
+    );
+  }
+
+  Widget _packTile(InstalledPack pack, CompanionCatalogue catalogue) {
+    final latest = catalogue.latestFor(pack.id);
+    final update =
+        latest != null && comparePackVersions(latest.version, pack.version) > 0;
+    return ListTile(
+      leading: _PackPreview(pack: pack, size: 48),
+      title: Text(
+        pack.manifest.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        'v${pack.version} · ${pack.manifest.author}'
+        '${update ? ' · Update available' : ''}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      onTap: () => _openPack(pack, catalogue),
     );
   }
 
@@ -504,43 +528,49 @@ class _PackPreview extends StatelessWidget {
 }
 
 class _LibraryEmpty extends StatelessWidget {
-  const _LibraryEmpty({required this.onBrowse});
+  const _LibraryEmpty({required this.onBrowse, required this.catalogueEmpty});
 
   final VoidCallback onBrowse;
+
+  /// Whether the marketplace has no listed packs, so the copy points at import.
+  final bool catalogueEmpty;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.pets_outlined,
-              size: 48,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 40, 24, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.pets_outlined,
+            size: 48,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 16),
+          Text('No companions installed', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Text(
+            catalogueEmpty
+                ? 'No marketplace packs are listed yet. '
+                      'Import a pack file to add a companion.'
+                : 'A companion keeps you company while you focus. '
+                      'Browse the marketplace or import a pack file.',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
-            const SizedBox(height: 16),
-            Text('No companions installed', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Text(
-              'A companion keeps you company while you focus. '
-              'Browse the marketplace or import a pack file.',
+          ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: onBrowse,
+            child: const Text(
+              'Browse marketplace',
               textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
             ),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: onBrowse,
-              icon: const Icon(Icons.storefront_outlined),
-              label: const Text('Browse marketplace'),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

@@ -1,6 +1,8 @@
-# Companion Focus
+# MinuteMeadow
 
-Companion Focus is an Android app in development for focus sessions, breaks, stopwatch laps and countdowns. It stores settings and session history on the device. You can import and manage companion packs without an account. The bundled catalogue starts empty.
+MinuteMeadow is an Android app in development for focus sessions, breaks, stopwatch laps and countdowns. It stores settings and session history on the device. You can import and manage companion packs without an account. The bundled catalogue starts empty.
+
+Source: <https://github.com/sheikhti1205/MinuteMeadow>.
 
 ## Build
 

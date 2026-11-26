@@ -1,6 +1,6 @@
 # Companion packs
 
-Companion Focus imports ZIP archives and JSON envelopes. Both formats use the same manifest and verify the same declared assets.
+MinuteMeadow imports ZIP archives and JSON envelopes. Both formats use the same manifest and verify the same declared assets.
 
 A ZIP contains `manifest.json`, a PNG preview, a `LICENSE` file and PNG sprite assets. Short PCM WAV sounds can be included under `sounds/`. Keep `manifest.json` at the archive root. A JSON envelope has `schema: "companion.bundle/1"`, a `manifest` object and an `assets` object that maps each asset path to its padded Base64 bytes. Packs contain no scripts or runtime extensions.
 

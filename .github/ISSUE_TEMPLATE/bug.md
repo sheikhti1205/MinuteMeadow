@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with Companion Focus
+about: Report a problem with MinuteMeadow
 ---
 
 ## App version and device

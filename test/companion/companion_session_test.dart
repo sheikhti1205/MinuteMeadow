@@ -86,7 +86,7 @@ void main() {
 
     expect(ok, isFalse);
     expect(writes, isEmpty);
-    expect(session.error, contains('needs Companion Focus 9.9.9'));
+    expect(session.error, contains('needs MinuteMeadow 9.9.9'));
   });
 
   test('a failed write keeps the previous version', () async {

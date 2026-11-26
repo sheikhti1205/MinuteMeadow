@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Companion Focus pack manifest",
+  "title": "MinuteMeadow pack manifest",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "id", "version", "name", "author", "license", "preview", "canvas", "palette", "layers", "clips", "assets"],

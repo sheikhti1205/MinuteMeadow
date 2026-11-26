@@ -1,6 +1,6 @@
 # Architecture
 
-Companion Focus targets Android phones. A web build supports browser checks of shared screens. Android-specific behavior such as notifications and device restart recovery requires separate verification.
+MinuteMeadow targets Android phones. A web build supports browser checks of shared screens. Android-specific behavior such as notifications and device restart recovery requires separate verification.
 
 Feature code lives under `lib/features/`. Application startup and navigation belong in `lib/app/`, shared visual tokens in `lib/design/`, and platform adapters in `lib/core/`.
 
