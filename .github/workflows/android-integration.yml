@@ -23,7 +23,7 @@ jobs:
           flutter-version: '3.44.0'
           channel: stable
       - run: flutter create --empty --no-pub --platforms=android --org=app.companionfocus --project-name=companion_focus .
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - name: Allow Android emulator access to KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules

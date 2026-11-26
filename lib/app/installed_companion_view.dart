@@ -134,7 +134,7 @@ class _InstalledCompanionViewState extends State<InstalledCompanionView>
   void _syncTicker() {
     if (!mounted) return;
     final stage = _stage;
-    final shouldRun = _active && TickerMode.of(context) &&
+    final shouldRun = _active && TickerMode.valuesOf(context).enabled &&
         stage != null && (_ballInPlay ||
             (!_reduceMotion && (stage.scene.isPetting || stage.hasAnimation)));
     if (shouldRun && !_ticker.isActive) {

@@ -2,6 +2,8 @@ import 'package:companion_focus/app/app.dart';
 import 'package:companion_focus/app/bootstrap.dart';
 import 'package:companion_focus/core/storage/local_database.dart';
 import 'package:companion_focus/core/time/boot_clock.dart';
+import 'package:companion_focus/core/time/timer_checkpoint.dart';
+import 'package:companion_focus/features/focus/focus_page.dart';
 import 'package:companion_focus/features/settings/app_settings.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,7 +13,7 @@ import 'package:integration_test/integration_test.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('Android opens stored preferences and saves a focus default', (tester) async {
+  testWidgets('Android saves focus defaults and active timer checkpoints', (tester) async {
     final database = LocalDatabase.open();
     final container = ProviderContainer(
       overrides: [databaseProvider.overrideWithValue(database)],
@@ -47,5 +49,27 @@ void main() {
     expect(AppSettings.decode(stored!).focusMinutes, 37);
     await tester.pumpAndSettle();
     expect(find.text('37 min'), findsOneWidget);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    final primary = find.byKey(FocusPage.primaryActionKey);
+    await tester.tap(primary);
+    await tester.pumpAndSettle();
+    expect(find.descendant(of: primary, matching: find.text('Pause')), findsOneWidget);
+
+    await tester.tap(primary);
+    await tester.pumpAndSettle();
+    expect(find.descendant(of: primary, matching: find.text('Resume')), findsOneWidget);
+
+    FocusSnapshot? snapshot;
+    for (var attempt = 0; attempt < 10; attempt++) {
+      final stored = await tester.runAsync(() => database.readState('focus'));
+      final checkpoint = TimerCheckpoint.decode(stored);
+      snapshot = FocusSnapshot.tryDecode(checkpoint?.snapshot);
+      if (snapshot?.status == FocusStatus.paused) break;
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(snapshot?.status, FocusStatus.paused);
+    expect(snapshot?.intended, const Duration(minutes: 37));
   });
 }

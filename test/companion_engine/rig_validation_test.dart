@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:companion_focus/companion_engine/debug/geometric_rig.dart';
 import 'package:companion_focus/companion_engine/rig/rig_model.dart';
 import 'package:companion_focus/companion_engine/rig/rig_validator.dart';

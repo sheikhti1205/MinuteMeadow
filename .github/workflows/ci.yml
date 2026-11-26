@@ -27,13 +27,7 @@ jobs:
           channel: stable
       - name: Prepare platform runners
         run: flutter create --empty --no-pub --platforms=android,web --org=app.companionfocus --project-name=companion_focus .
-      - run: flutter pub get
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: dependency-lock
-          path: pubspec.lock
-          if-no-files-found: error
-          retention-days: 3
+      - run: flutter pub get --enforce-lockfile
       - run: flutter analyze --fatal-infos
       - run: flutter test
       - run: flutter build apk --debug

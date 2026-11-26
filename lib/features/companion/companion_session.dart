@@ -1,11 +1,8 @@
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart';
 
 import '../../app/branding.dart';
 import 'companion_library.dart';
 import 'pack_bundle.dart';
-import 'pack_manifest.dart';
 
 /// Owns the installed companion library and its persisted snapshot.
 ///
