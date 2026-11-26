@@ -10,6 +10,7 @@ import 'package:companion_focus/features/settings/app_settings.dart';
 import 'package:companion_focus/features/settings/settings_page.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,6 +30,55 @@ TickerMode _tabTicker(
 }) => tester.widget<TickerMode>(
   find.byKey(ValueKey('tab-ticker-$index'), skipOffstage: skipOffstage),
 );
+
+/// Waits, in bounded steps, until a popped page has left the route stack.
+///
+/// [Navigator.maybePop] resolves asynchronously, so the reverse transition can
+/// start only after the first pump; one fixed pump then lands on the ticker's
+/// first frame and still measures zero elapsed time. While the page is still
+/// on top its barrier swallows taps meant for the shell below.
+Future<void> _settlePushedPage(WidgetTester tester, Finder page) async {
+  for (var attempt = 0; attempt < 24 && page.evaluate().isNotEmpty; attempt++) {
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+  expect(page, findsNothing, reason: 'The pushed page should finish closing.');
+}
+
+/// Waits for the primary action to be enabled again.
+///
+/// A finished session is recorded before the page allows the next one, so the
+/// control stays disabled while that write is in flight.
+Future<void> _awaitPrimaryAction(WidgetTester tester) async {
+  final action = find.byKey(FocusPage.primaryActionKey);
+  for (var attempt = 0; attempt < 40; attempt++) {
+    if (action.evaluate().isNotEmpty &&
+        tester.widget<FilledButton>(action).onPressed != null) {
+      return;
+    }
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+  expect(
+    tester.widget<FilledButton>(action).onPressed,
+    isNotNull,
+    reason: 'The cancelled session must be saved before another one starts.',
+  );
+}
+
+/// Answers the boot-clock platform call every timer checkpoint awaits.
+///
+/// A widget test has no host process behind the platform channels, and that
+/// reply never reaches a fake-async test body. The checkpoint future would
+/// stay pending, blocking the serialized write queue and with it the page's
+/// "save the finished session, then allow another" gate.
+void _mockBootClock() {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(
+        const MethodChannel('app.companionfocus/boot_clock'),
+        (call) async => call.method == 'sample'
+            ? const <String, int>{'bootCount': 0, 'elapsedMs': 0}
+            : null,
+      );
+}
 
 void main() {
   testWidgets('opens the four destinations and returns from settings', (
@@ -64,7 +114,7 @@ void main() {
 
     await tester.pageBack();
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 350));
+    await _settlePushedPage(tester, find.byType(SettingsPage));
     expect(find.text('MinuteMeadow'), findsOneWidget);
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(_tabTicker(tester, 0).enabled, isTrue);
@@ -144,7 +194,7 @@ void main() {
 
     await tester.pageBack();
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 350));
+    await _settlePushedPage(tester, find.byType(SettingsPage));
     expect(identical(tester.state<State<FocusPage>>(find.byType(FocusPage)), focusState), isTrue);
     expect(
       tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
@@ -165,7 +215,7 @@ void main() {
     expect(find.byType(SettingsPage), findsOneWidget);
     await tester.pageBack();
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 350));
+    await _settlePushedPage(tester, find.byType(SettingsPage));
     expect(
       tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
       1,
@@ -299,6 +349,8 @@ void main() {
 
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.text('Session cancelled'), findsOneWidget);
+    // The cancelled session is recorded before another one may start.
+    await _awaitPrimaryAction(tester);
 
     await tester.ensureVisible(find.byKey(FocusPage.primaryActionKey));
     await tester.pump();
@@ -332,6 +384,7 @@ Widget _app({
   String? focus,
   String? companion,
 }) {
+  _mockBootClock();
   final database = LocalDatabase(NativeDatabase.memory());
   addTearDown(database.close);
   return ProviderScope(

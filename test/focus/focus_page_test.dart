@@ -146,40 +146,43 @@ void main() {
   testWidgets('home offers timer configuration only when the host wires it', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
-    addTearDown(handle.dispose);
     final settings = ValueNotifier(const FocusSettings());
     addTearDown(settings.dispose);
-    var configured = 0;
+    final handle = tester.ensureSemantics();
+    try {
+      var configured = 0;
 
-    await tester.pumpWidget(
-      _host(
-        settings: settings,
-        onOutcome: (outcome, snapshot) async {},
-        onSnapshot: (snapshot) async {},
-        onConfigureTimers: () => configured += 1,
-      ),
-    );
-    await tester.pump();
+      await tester.pumpWidget(
+        _host(
+          settings: settings,
+          onOutcome: (outcome, snapshot) async {},
+          onSnapshot: (snapshot) async {},
+          onConfigureTimers: () => configured += 1,
+        ),
+      );
+      await tester.pump();
 
-    final action = find.byKey(FocusPage.configureTimersKey);
-    expect(action, findsOneWidget);
-    expect(find.text('Edit timers'), findsOneWidget);
-    final data = tester.getSemantics(action).getSemanticsData();
-    expect(data.label, 'Edit focus and break durations in settings');
-    expect(data.hasAction(SemanticsAction.tap), isTrue);
-    expect(data.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
-    expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
+      final action = find.byKey(FocusPage.configureTimersKey);
+      expect(action, findsOneWidget);
+      expect(find.text('Edit timers'), findsOneWidget);
+      final data = tester.getSemantics(action).getSemanticsData();
+      expect(data.label, 'Edit focus and break durations in settings');
+      expect(data.hasAction(SemanticsAction.tap), isTrue);
+      expect(data.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
+      expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
 
-    await tester.tap(action);
-    await tester.pump();
-    expect(configured, 1);
+      await tester.tap(action);
+      await tester.pump();
+      expect(configured, 1);
 
-    await _start(tester);
-    expect(find.byKey(FocusPage.configureTimersKey), findsNothing);
-    expect(find.text('Edit timers'), findsNothing);
+      await _start(tester);
+      expect(find.byKey(FocusPage.configureTimersKey), findsNothing);
+      expect(find.text('Edit timers'), findsNothing);
 
-    await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(const SizedBox.shrink());
+    } finally {
+      handle.dispose();
+    }
   });
 
   testWidgets('uses the active color scheme in light and dark', (tester) async {
@@ -603,59 +606,64 @@ void main() {
   testWidgets('slide exposes a confirmable screen-reader and keyboard path', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
-    addTearDown(handle.dispose);
     final settings = ValueNotifier(const FocusSettings());
     addTearDown(settings.dispose);
+    final handle = tester.ensureSemantics();
+    try {
+      await tester.pumpWidget(
+        _host(
+          settings: settings,
+          onOutcome: (outcome, snapshot) async {},
+          onSnapshot: (snapshot) async {},
+        ),
+      );
+      await tester.pump();
+      await _start(tester);
 
-    await tester.pumpWidget(
-      _host(
-        settings: settings,
-        onOutcome: (outcome, snapshot) async {},
-        onSnapshot: (snapshot) async {},
-      ),
-    );
-    await tester.pump();
-    await _start(tester);
+      expect(
+        tester
+            .getSemantics(find.byKey(FocusPage.timeSemanticsKey))
+            .getSemanticsData()
+            .label,
+        contains('Time remaining'),
+      );
+      expect(find.byTooltip('End focus session'), findsOneWidget);
 
-    expect(
-      tester
-          .getSemantics(find.byKey(FocusPage.timeSemanticsKey))
-          .getSemanticsData()
-          .label,
-      contains('Time remaining'),
-    );
-    expect(find.byTooltip('End focus session'), findsOneWidget);
+      final slideNode = tester.getSemantics(
+        find.byKey(SlideToQuit.semanticsKey),
+      );
+      expect(
+        slideNode.getSemanticsData().label,
+        'Slide to quit focus',
+      );
+      expect(
+        slideNode.getSemanticsData().hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+      final detector = tester.widget<FocusableActionDetector>(
+        find.descendant(
+          of: find.byType(SlideToQuit),
+          matching: find.byType(FocusableActionDetector),
+        ),
+      );
+      expect(detector.enabled, isTrue);
+      expect(detector.shortcuts, isNotEmpty);
 
-    final slideNode = tester.getSemantics(
-      find.byKey(SlideToQuit.semanticsKey),
-    );
-    expect(
-      slideNode.getSemanticsData().label,
-      'Slide to quit focus',
-    );
-    expect(slideNode.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
-    final detector = tester.widget<FocusableActionDetector>(
-      find.descendant(
-        of: find.byType(SlideToQuit),
-        matching: find.byType(FocusableActionDetector),
-      ),
-    );
-    expect(detector.enabled, isTrue);
-    expect(detector.shortcuts, isNotEmpty);
+      tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+        slideNode.id,
+        SemanticsAction.tap,
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Cancel this focus session?'), findsOneWidget);
+      await tester.tap(find.text('Keep going'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
-    tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
-      slideNode.id,
-      SemanticsAction.tap,
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Cancel this focus session?'), findsOneWidget);
-    await tester.tap(find.text('Keep going'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(const SizedBox.shrink());
+    } finally {
+      handle.dispose();
+    }
   });
 
   testWidgets('break flow keeps shell chrome and can cancel', (tester) async {

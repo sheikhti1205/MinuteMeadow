@@ -103,8 +103,6 @@ void main() {
     final fixture = await _fixture(tester);
     final ambient = ValueNotifier<String?>(null);
     addTearDown(ambient.dispose);
-    final semantics = tester.ensureSemantics();
-    addTearDown(semantics.dispose);
 
     await tester.pumpWidget(
       _scaledHost(
