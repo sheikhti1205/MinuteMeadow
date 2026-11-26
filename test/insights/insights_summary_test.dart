@@ -319,4 +319,102 @@ void main() {
       const CalendarDay(2028, 2, 29),
     );
   });
+
+  test('filters inclusive local dates and completion outcome', () {
+    final sessions = <SessionRecord>[
+      _session(id: 'before', finishedAt: DateTime(2026, 11, 19, 23, 59)),
+      _session(id: 'from-day', finishedAt: DateTime(2026, 11, 20, 9)),
+      _session(
+        id: 'middle-partial',
+        finishedAt: DateTime(2026, 11, 21, 12),
+        actual: const Duration(minutes: 10),
+        completed: false,
+      ),
+      _session(id: 'to-day', finishedAt: DateTime(2026, 11, 22, 23, 59)),
+      _session(id: 'after', finishedAt: DateTime(2026, 11, 23)),
+    ];
+
+    final filtered = filterSessions(
+      sessions,
+      from: const CalendarDay(2026, 11, 20),
+      to: const CalendarDay(2026, 11, 22),
+      outcome: SessionOutcomeFilter.completed,
+      localDay: (instant) =>
+          CalendarDay(instant.year, instant.month, instant.day),
+    );
+
+    expect(filtered.map((session) => session.id), ['from-day', 'to-day']);
+  });
+
+  test('selects sessions for overview periods and keeps newest first', () {
+    final sessions = <SessionRecord>[
+      _session(id: 'previous-week', finishedAt: DateTime(2026, 11, 22, 23)),
+      _session(id: 'week-start', finishedAt: DateTime(2026, 11, 23, 8)),
+      _session(id: 'today-a', finishedAt: DateTime(2026, 11, 26, 9)),
+      _session(id: 'today-b', finishedAt: DateTime(2026, 11, 26, 15)),
+    ];
+    final today = const CalendarDay(2026, 11, 26);
+
+    final week = sessionsInPeriod(
+      sessions,
+      period: InsightsPeriod.week,
+      today: today,
+    );
+    expect(week.map((session) => session.id), [
+      'today-b',
+      'today-a',
+      'week-start',
+    ]);
+
+    final todayOnly = sessionsInPeriod(
+      sessions,
+      period: InsightsPeriod.today,
+      today: today,
+    );
+    expect(todayOnly.map((session) => session.id), ['today-b', 'today-a']);
+
+    final month = sessionsInPeriod(
+      sessions,
+      period: InsightsPeriod.month,
+      today: today,
+    );
+    expect(month, hasLength(4));
+
+    final all = sessionsInPeriod(
+      sessions,
+      period: InsightsPeriod.all,
+      today: today,
+    );
+    expect(all.map((session) => session.id), [
+      'today-b',
+      'today-a',
+      'week-start',
+      'previous-week',
+    ]);
+  });
+
+  test('totals from a filtered set drive completion and average values', () {
+    final totals = SessionTotals.of([
+      _session(
+        id: 'complete',
+        finishedAt: DateTime(2026, 11, 26, 9),
+        intended: const Duration(minutes: 50),
+      ),
+      _session(
+        id: 'partial',
+        finishedAt: DateTime(2026, 11, 26, 11),
+        intended: const Duration(minutes: 50),
+        actual: const Duration(minutes: 20),
+        completed: false,
+      ),
+    ]);
+
+    expect(totals.sessions, 2);
+    expect(totals.completed, 1);
+    expect(totals.focused, const Duration(minutes: 70));
+    expect(totals.intended, const Duration(minutes: 100));
+    expect(totals.completionPercent, 50);
+    expect(totals.averageFocused, const Duration(minutes: 35));
+    expect(SessionTotals.empty.completionPercent, 0);
+  });
 }

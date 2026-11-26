@@ -21,51 +21,493 @@ enum FocusPhase {
   };
 }
 
-/// Configurable timer defaults. Minutes are validated by the settings surface
-/// that owns them; the engine refuses to start a non-positive duration.
+/// Configurable timer plan. Values are validated at the surface that edits
+/// them; the engine refuses to start a non-positive duration.
 class FocusSettings {
   const FocusSettings({
     this.focusMinutes = TimerDefaults.focusMinutes,
     this.shortBreakMinutes = TimerDefaults.shortBreakMinutes,
     this.longBreakMinutes = TimerDefaults.longBreakMinutes,
+    this.sessionsPerCycle = TimerDefaults.sessionsPerCycle,
   });
 
   static const defaults = FocusSettings();
+
+  static const minFocusMinutes = 1;
+  static const maxFocusMinutes = 180;
+  static const minBreakMinutes = 1;
+  static const maxBreakMinutes = 60;
+  static const minSessionsPerCycle = 1;
+  static const maxSessionsPerCycle = 12;
 
   final int focusMinutes;
   final int shortBreakMinutes;
   final int longBreakMinutes;
 
+  /// Focus blocks in one finite plan. The plan ends after this many focus
+  /// sessions, with the final block followed by a long break.
+  final int sessionsPerCycle;
+
   Duration durationFor(FocusPhase phase) => phase.durationFor(this);
+
+  bool get isValid => validationError == null;
+
+  /// A user-facing reason the plan cannot be used, or null when valid.
+  String? get validationError {
+    if (focusMinutes < minFocusMinutes || focusMinutes > maxFocusMinutes) {
+      return 'Focus must be $minFocusMinutes-$maxFocusMinutes minutes.';
+    }
+    if (shortBreakMinutes < minBreakMinutes ||
+        shortBreakMinutes > maxBreakMinutes) {
+      return 'Short break must be $minBreakMinutes-$maxBreakMinutes minutes.';
+    }
+    if (longBreakMinutes < minBreakMinutes ||
+        longBreakMinutes > maxBreakMinutes) {
+      return 'Long break must be $minBreakMinutes-$maxBreakMinutes minutes.';
+    }
+    if (sessionsPerCycle < minSessionsPerCycle ||
+        sessionsPerCycle > maxSessionsPerCycle) {
+      return 'Sessions must be $minSessionsPerCycle-$maxSessionsPerCycle.';
+    }
+    return null;
+  }
 
   FocusSettings copyWith({
     int? focusMinutes,
     int? shortBreakMinutes,
     int? longBreakMinutes,
+    int? sessionsPerCycle,
   }) => FocusSettings(
     focusMinutes: focusMinutes ?? this.focusMinutes,
     shortBreakMinutes: shortBreakMinutes ?? this.shortBreakMinutes,
     longBreakMinutes: longBreakMinutes ?? this.longBreakMinutes,
+    sessionsPerCycle: sessionsPerCycle ?? this.sessionsPerCycle,
+  );
+
+  Map<String, Object> toJson() => <String, Object>{
+    'focusMinutes': focusMinutes,
+    'shortBreakMinutes': shortBreakMinutes,
+    'longBreakMinutes': longBreakMinutes,
+    'sessionsPerCycle': sessionsPerCycle,
+  };
+
+  static FocusSettings? tryDecode(Object? value) {
+    if (value is! Map<String, dynamic>) return null;
+    final focus = value['focusMinutes'];
+    final short = value['shortBreakMinutes'];
+    final long = value['longBreakMinutes'];
+    if (focus is! int || short is! int || long is! int) return null;
+    final rawSessions = value['sessionsPerCycle'];
+    final settings = FocusSettings(
+      focusMinutes: focus,
+      shortBreakMinutes: short,
+      longBreakMinutes: long,
+      sessionsPerCycle: rawSessions is int
+          ? rawSessions
+          : TimerDefaults.sessionsPerCycle,
+    );
+    return settings.isValid ? settings : null;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is FocusSettings &&
+      other.focusMinutes == focusMinutes &&
+      other.shortBreakMinutes == shortBreakMinutes &&
+      other.longBreakMinutes == longBreakMinutes &&
+      other.sessionsPerCycle == sessionsPerCycle;
+
+  @override
+  int get hashCode => Object.hash(
+    focusMinutes,
+    shortBreakMinutes,
+    longBreakMinutes,
+    sessionsPerCycle,
   );
 }
 
-enum FocusPreset {
-  defaults('Default', null),
-  sprint('Sprint', FocusSettings(focusMinutes: 15, shortBreakMinutes: 3, longBreakMinutes: 10)),
-  deepWork('Deep work', FocusSettings(focusMinutes: 50, shortBreakMinutes: 10, longBreakMinutes: 20));
+/// A named timer plan the setup surface can select, edit and persist.
+///
+/// The built-in [defaults] preset mirrors the shared timer settings and is the
+/// safe fallback when any other preset is removed. Built-ins are ordinary
+/// values so old snapshots that stored the enum name keep decoding.
+class FocusPreset {
+  const FocusPreset({
+    required this.id,
+    required this.name,
+    required this.presetSettings,
+    this.isBuiltIn = false,
+    this.fixed = false,
+  });
 
-  const FocusPreset(this.label, this.fixedSettings);
+  static const defaultsId = 'defaults';
+  static const sprintId = 'sprint';
+  static const deepWorkId = 'deepWork';
 
-  final String label;
-  final FocusSettings? fixedSettings;
+  static const defaults = FocusPreset(
+    id: defaultsId,
+    name: 'Default',
+    presetSettings: FocusSettings.defaults,
+    isBuiltIn: true,
+    fixed: true,
+  );
 
-  FocusSettings settings(FocusSettings defaults) => fixedSettings ?? defaults;
+  static const sprint = FocusPreset(
+    id: sprintId,
+    name: 'Sprint',
+    presetSettings: FocusSettings(
+      focusMinutes: 15,
+      shortBreakMinutes: 3,
+      longBreakMinutes: 10,
+    ),
+    isBuiltIn: true,
+  );
 
+  static const deepWork = FocusPreset(
+    id: deepWorkId,
+    name: 'Deep work',
+    presetSettings: FocusSettings(
+      focusMinutes: 50,
+      shortBreakMinutes: 10,
+      longBreakMinutes: 20,
+    ),
+    isBuiltIn: true,
+  );
+
+  static const builtIns = <FocusPreset>[defaults, sprint, deepWork];
+
+  final String id;
+  final String name;
+  final FocusSettings presetSettings;
+  final bool isBuiltIn;
+
+  /// The default preset resolves to the shared timer settings, so it stays in
+  /// step with Settings and cannot be renamed or deleted.
+  final bool fixed;
+
+  String get label => name;
+  bool get canEdit => !fixed;
+  bool get canRename => !fixed;
+  bool get canDelete => !fixed;
+
+  FocusSettings settings(FocusSettings fallback) =>
+      fixed ? fallback : presetSettings;
+
+  FocusPreset copyWith({String? name, FocusSettings? presetSettings}) =>
+      FocusPreset(
+        id: id,
+        name: name ?? this.name,
+        presetSettings: presetSettings ?? this.presetSettings,
+        isBuiltIn: isBuiltIn,
+        fixed: fixed,
+      );
+
+  /// Reads a built-in id or a legacy enum/[name] value. Custom presets are
+  /// resolved from a [FocusPlanState], never guessed from the snapshot.
   static FocusPreset? tryRead(Object? value) {
-    for (final preset in values) {
-      if (value == preset.name) return preset;
+    if (value is! String) return null;
+    for (final preset in builtIns) {
+      if (value == preset.id || value == preset.name) return preset;
     }
     return null;
+  }
+
+  Map<String, Object> toJson() => <String, Object>{
+    'id': id,
+    'name': name,
+    'settings': presetSettings.toJson(),
+  };
+
+  static FocusPreset? tryDecode(Object? value) {
+    if (value is! Map<String, dynamic>) return null;
+    final id = value['id'];
+    final name = value['name'];
+    final settings = FocusSettings.tryDecode(value['settings']);
+    if (id is! String ||
+        id.isEmpty ||
+        id.length > 80 ||
+        name is! String ||
+        settings == null) {
+      return null;
+    }
+    final trimmed = name.trim();
+    if (trimmed.isEmpty || trimmed.length > 40) return null;
+    if (id == defaultsId) return FocusPreset.defaults;
+    return FocusPreset(
+      id: id,
+      name: trimmed,
+      presetSettings: settings,
+      isBuiltIn: FocusPreset.builtIns.any((preset) => preset.id == id),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) => other is FocusPreset && other.id == id;
+
+  @override
+  int get hashCode => id.hashCode;
+
+  @override
+  String toString() => 'FocusPreset($id)';
+}
+
+/// The persisted setup owner for the Focus destination.
+///
+/// It holds the named presets, the safe default, the selected preset, an
+/// optional one-off plan and the explicit auto-advance preference. The page
+/// keeps one instance and writes it through the existing timer snapshot owner,
+/// so presets and the timer share one atomic persistence path.
+class FocusPlanState {
+  const FocusPlanState({
+    required this.presets,
+    required this.defaultId,
+    required this.selectedId,
+    this.oneOffSettings,
+    this.autoAdvance = false,
+  });
+
+  static const initial = FocusPlanState(
+    presets: FocusPreset.builtIns,
+    defaultId: FocusPreset.defaultsId,
+    selectedId: FocusPreset.defaultsId,
+  );
+
+  static const maxPresets = 50;
+
+  final List<FocusPreset> presets;
+  final String defaultId;
+  final String selectedId;
+
+  /// Applies to the next whole plan and is cleared when that plan ends.
+  final FocusSettings? oneOffSettings;
+
+  /// Manual phase changes by default; true starts the next phase automatically
+  /// after a completed session outcome has been saved.
+  final bool autoAdvance;
+
+  bool get isOneOff => oneOffSettings != null;
+
+  FocusPreset? presetById(String? id) {
+    if (id == null) return null;
+    for (final preset in presets) {
+      if (preset.id == id) return preset;
+    }
+    return null;
+  }
+
+  FocusPreset get defaultPreset =>
+      presetById(defaultId) ?? presets.first;
+
+  FocusPreset get selectedPreset =>
+      presetById(selectedId) ?? defaultPreset;
+
+  FocusSettings resolve(FocusSettings fallback) =>
+      oneOffSettings ?? selectedPreset.settings(fallback);
+
+  bool canDelete(String id) {
+    final preset = presetById(id);
+    return preset != null &&
+        preset.canDelete &&
+        presets.length > 1 &&
+        id != defaultId;
+  }
+
+  String? validatePresetName(String name, {String? exceptId}) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return 'Enter a preset name.';
+    if (trimmed.length > 40) return 'Use 40 characters or fewer.';
+    final lower = trimmed.toLowerCase();
+    for (final preset in presets) {
+      if (preset.id != exceptId && preset.name.toLowerCase() == lower) {
+        return 'That name is already used.';
+      }
+    }
+    return null;
+  }
+
+  String _newPresetId() {
+    var index = presets.length;
+    while (presetById('custom-$index') != null) {
+      index++;
+    }
+    return 'custom-$index';
+  }
+
+  FocusPlanState copyWith({
+    List<FocusPreset>? presets,
+    String? defaultId,
+    String? selectedId,
+    FocusSettings? oneOffSettings,
+    bool clearOneOff = false,
+    bool? autoAdvance,
+  }) => FocusPlanState(
+    presets: presets ?? this.presets,
+    defaultId: defaultId ?? this.defaultId,
+    selectedId: selectedId ?? this.selectedId,
+    oneOffSettings: clearOneOff
+        ? null
+        : (oneOffSettings ?? this.oneOffSettings),
+    autoAdvance: autoAdvance ?? this.autoAdvance,
+  );
+
+  FocusPlanState addPreset(
+    String name,
+    FocusSettings settings, {
+    bool makeDefault = false,
+  }) {
+    if (!settings.isValid ||
+        presets.length >= maxPresets ||
+        validatePresetName(name) != null) {
+      return this;
+    }
+    final preset = FocusPreset(
+      id: _newPresetId(),
+      name: name.trim(),
+      presetSettings: settings,
+    );
+    return copyWith(
+      presets: <FocusPreset>[...presets, preset],
+      selectedId: preset.id,
+      defaultId: makeDefault ? preset.id : defaultId,
+    );
+  }
+
+  FocusPlanState updatePreset(
+    String id,
+    FocusSettings settings, {
+    bool makeDefault = false,
+  }) {
+    final preset = presetById(id);
+    if (preset == null || preset.fixed || !settings.isValid) return this;
+    return copyWith(
+      presets: <FocusPreset>[
+        for (final item in presets)
+          if (item.id == id)
+            item.copyWith(presetSettings: settings)
+          else
+            item,
+      ],
+      selectedId: id,
+      defaultId: makeDefault ? id : defaultId,
+    );
+  }
+
+  FocusPlanState renamePreset(String id, String name) {
+    final preset = presetById(id);
+    if (preset == null ||
+        !preset.canRename ||
+        validatePresetName(name, exceptId: id) != null) {
+      return this;
+    }
+    final trimmed = name.trim();
+    return copyWith(
+      presets: <FocusPreset>[
+        for (final item in presets)
+          if (item.id == id) item.copyWith(name: trimmed) else item,
+      ],
+    );
+  }
+
+  FocusPlanState duplicatePreset(String id, {FocusSettings? fallback}) {
+    final source = presetById(id);
+    if (source == null || presets.length >= maxPresets) return this;
+    final base = source.name.length > 28
+        ? source.name.substring(0, 28)
+        : source.name;
+    var candidate = '$base copy';
+    var index = 2;
+    while (validatePresetName(candidate) != null) {
+      candidate = '$base copy $index';
+      index++;
+    }
+    final settings = source.fixed
+        ? (fallback ?? FocusSettings.defaults)
+        : source.presetSettings;
+    if (!settings.isValid) return this;
+    final duplicate = FocusPreset(
+      id: _newPresetId(),
+      name: candidate,
+      presetSettings: settings,
+    );
+    return copyWith(
+      presets: <FocusPreset>[...presets, duplicate],
+      selectedId: duplicate.id,
+    );
+  }
+
+  /// Removes a preset when it is safe; returns the same instance otherwise.
+  /// Removing the selected preset falls back to the safe default.
+  FocusPlanState deletePreset(String id) {
+    if (!canDelete(id)) return this;
+    final next = <FocusPreset>[
+      for (final preset in presets)
+        if (preset.id != id) preset,
+    ];
+    return copyWith(
+      presets: next,
+      selectedId: selectedId == id ? defaultId : selectedId,
+    );
+  }
+
+  FocusPlanState setDefault(String id) {
+    if (presetById(id) == null) return this;
+    return copyWith(defaultId: id);
+  }
+
+  FocusPlanState select(String id) {
+    if (presetById(id) == null) return this;
+    // A pending one-off applies to the next whole plan; only ending that plan
+    // clears it, so choosing a preset must not consume it silently.
+    return copyWith(selectedId: id);
+  }
+
+  FocusPlanState useOneOff(FocusSettings settings) {
+    if (!settings.isValid) return this;
+    return copyWith(oneOffSettings: settings);
+  }
+
+  FocusPlanState clearOneOff() => copyWith(clearOneOff: true);
+
+  FocusPlanState withAutoAdvance(bool value) =>
+      copyWith(autoAdvance: value);
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'presets': <Object>[for (final preset in presets) preset.toJson()],
+    'defaultId': defaultId,
+    'selectedId': selectedId,
+    if (oneOffSettings case final settings?) 'oneOff': settings.toJson(),
+    'autoAdvance': autoAdvance,
+  };
+
+  static FocusPlanState? tryDecode(Object? value) {
+    if (value is! Map<String, dynamic>) return null;
+    final rawPresets = value['presets'];
+    if (rawPresets is! List<Object?>) return null;
+    final decoded = <FocusPreset>[];
+    final ids = <String>{};
+    for (final raw in rawPresets) {
+      if (decoded.length >= maxPresets) break;
+      final preset = FocusPreset.tryDecode(raw);
+      if (preset != null && ids.add(preset.id)) decoded.add(preset);
+    }
+    if (decoded.isEmpty) return null;
+
+    final rawDefault = value['defaultId'];
+    final defaultId = rawDefault is String && ids.contains(rawDefault)
+        ? rawDefault
+        : decoded.first.id;
+    final rawSelected = value['selectedId'];
+    final selectedId = rawSelected is String && ids.contains(rawSelected)
+        ? rawSelected
+        : defaultId;
+    final oneOff = FocusSettings.tryDecode(value['oneOff']);
+    return FocusPlanState(
+      presets: decoded,
+      defaultId: defaultId,
+      selectedId: selectedId,
+      oneOffSettings: oneOff,
+      autoAdvance: value['autoAdvance'] == true,
+    );
   }
 }
 
@@ -93,6 +535,12 @@ class FocusOutcome {
 
 /// A versioned, JSON-safe view of the engine. Running sessions persist their
 /// wall-clock anchor; the page restores from it after a process restart.
+///
+/// Version 2 adds an optional [plan] document (presets, one-off plan,
+/// auto-advance). Version 3 adds the active plan's finite target, its progress
+/// and the settings it started with. Version 1 and 2 snapshots still decode;
+/// a legacy snapshot without plan fields never carries lifetime focus counts
+/// into the new plan progress, so no phantom blocks appear after an upgrade.
 class FocusSnapshot {
   const FocusSnapshot({
     required this.id,
@@ -105,9 +553,15 @@ class FocusSnapshot {
     required this.finishedAt,
     required this.completedFocusSessions,
     this.preset,
+    this.plan,
+    this.planTarget,
+    this.planCompleted = 0,
+    this.planSettings,
+    this.breakSkipped = false,
   });
 
-  static const _version = 1;
+  static const _version = 3;
+  static const _readableVersions = <int>{1, 2, 3};
   static const _maxIntendedMs = 24 * 60 * 60 * 1000;
   static const _maxCompletedSessions = 1000000;
 
@@ -121,20 +575,45 @@ class FocusSnapshot {
   final DateTime? finishedAt;
   final int completedFocusSessions;
   final FocusPreset? preset;
+  final FocusPlanState? plan;
 
-  String encode({FocusPreset? selectedPreset}) => jsonEncode(<String, Object?>{
-    'version': _version,
-    'id': id,
-    'phase': phase.name,
-    'status': status.name,
-    'startedAt': startedAt?.millisecondsSinceEpoch,
-    'anchor': anchor?.millisecondsSinceEpoch,
-    'intendedMs': intended.inMilliseconds,
-    'remainingMs': remaining?.inMilliseconds,
-    'finishedAt': finishedAt?.millisecondsSinceEpoch,
-    'completedFocusSessions': completedFocusSessions,
-    if ((selectedPreset ?? preset) case final active?) 'preset': active.name,
-  });
+  /// Focus blocks in the active plan, or 0 when no plan is running. Null in a
+  /// legacy/unspecified snapshot; the engine then captures the current target
+  /// from settings instead of guessing progress.
+  final int? planTarget;
+
+  /// Focus blocks already completed in the active plan, never negative and
+  /// never greater than [planTarget].
+  final int planCompleted;
+
+  /// The settings the active plan started with, so recovery keeps its
+  /// durations even when the shared defaults changed in the meantime.
+  final FocusSettings? planSettings;
+
+  /// True when the last break was skipped rather than run to completion.
+  final bool breakSkipped;
+
+  String encode({FocusPreset? selectedPreset, FocusPlanState? plan}) =>
+      jsonEncode(<String, Object?>{
+        'version': _version,
+        'id': id,
+        'phase': phase.name,
+        'status': status.name,
+        'startedAt': startedAt?.millisecondsSinceEpoch,
+        'anchor': anchor?.millisecondsSinceEpoch,
+        'intendedMs': intended.inMilliseconds,
+        'remainingMs': remaining?.inMilliseconds,
+        'finishedAt': finishedAt?.millisecondsSinceEpoch,
+        'completedFocusSessions': completedFocusSessions,
+        if ((selectedPreset ?? preset) case final active?)
+          'preset': active.id,
+        if (plan != null) 'plan': plan.toJson(),
+        if (planTarget case final target?) 'planTarget': target,
+        if (planTarget != null) 'planCompleted': planCompleted,
+        if (planSettings case final settings?)
+          'planSettings': settings.toJson(),
+        if (planTarget != null) 'breakSkipped': breakSkipped,
+      });
 
   static FocusSnapshot? tryDecode(String? source) {
     if (source == null || source.trim().isEmpty) return null;
@@ -147,16 +626,18 @@ class FocusSnapshot {
     }
     if (decoded is! Map<String, dynamic>) return null;
 
+    final version = decoded['version'];
     final phase = _phaseFrom(decoded['phase']);
     final status = _statusFrom(decoded['status']);
     final intendedMs = decoded['intendedMs'];
     final completedCount = decoded['completedFocusSessions'];
-    if (decoded['version'] != _version || phase == null || status == null) {
+    if (version is! int ||
+        !_readableVersions.contains(version) ||
+        phase == null ||
+        status == null) {
       return null;
     }
-    if (intendedMs is! int ||
-        intendedMs <= 0 ||
-        intendedMs > _maxIntendedMs) {
+    if (intendedMs is! int || intendedMs <= 0 || intendedMs > _maxIntendedMs) {
       return null;
     }
     if (completedCount is! int ||
@@ -187,6 +668,55 @@ class FocusSnapshot {
       return null;
     }
 
+    final plan = version >= 2 ? FocusPlanState.tryDecode(decoded['plan']) : null;
+
+    int? planTarget;
+    var planCompleted = 0;
+    FocusSettings? planSettings;
+    var breakSkipped = false;
+    if (version >= 3) {
+      final rawTarget = decoded['planTarget'];
+      if (rawTarget != null && rawTarget is! int) return null;
+      if (rawTarget is int) {
+        if (rawTarget < 0 || rawTarget > FocusSettings.maxSessionsPerCycle) {
+          return null;
+        }
+        planTarget = rawTarget;
+      }
+      final rawCompleted = decoded['planCompleted'];
+      if (rawCompleted != null && rawCompleted is! int) return null;
+      if (rawCompleted is int) {
+        if (rawCompleted < 0) return null;
+        planCompleted = rawCompleted;
+      }
+      if (planTarget != null && planCompleted > planTarget) return null;
+      if (planTarget == 0 && planCompleted != 0) return null;
+      planSettings = FocusSettings.tryDecode(decoded['planSettings']);
+      final rawSkipped = decoded['breakSkipped'];
+      if (rawSkipped != null && rawSkipped is! bool) return null;
+      breakSkipped = rawSkipped == true;
+    }
+
+    // A running, paused or completed timer always belongs to a plan. A missing
+    // target in a legacy snapshot is left unspecified so the engine can adopt
+    // the current settings and derive at most the blocks the state proves.
+    final needsPlan = status == FocusStatus.running ||
+        status == FocusStatus.paused ||
+        status == FocusStatus.completed;
+    if (needsPlan && planTarget == 0) {
+      planTarget = null;
+      planCompleted = 0;
+      breakSkipped = false;
+    }
+    if (planTarget == null || planTarget == 0) {
+      planSettings = null;
+      breakSkipped = false;
+      planCompleted = 0;
+    } else if (breakSkipped &&
+        !(status == FocusStatus.completed && phase.isBreak)) {
+      breakSkipped = false;
+    }
+
     return FocusSnapshot(
       id: id,
       phase: phase,
@@ -197,7 +727,12 @@ class FocusSnapshot {
       remaining: remaining,
       finishedAt: finishedAt,
       completedFocusSessions: completedCount,
-      preset: FocusPreset.tryRead(decoded['preset']),
+      preset: plan?.selectedPreset ?? FocusPreset.tryRead(decoded['preset']),
+      plan: plan,
+      planTarget: planTarget,
+      planCompleted: planCompleted,
+      planSettings: planSettings,
+      breakSkipped: breakSkipped,
     );
   }
 
@@ -281,13 +816,28 @@ class FocusEngine {
   int _idSequence = 0;
   FocusOutcome? _lastOutcome;
 
+  /// Finite plan state. A plan starts on the first focus block, ends after the
+  /// target block's long break (or End/Done), and never recurs on its own.
+  int _planTarget = 0;
+  int _planCompleted = 0;
+  FocusSettings? _planSettings;
+  bool _breakSkipped = false;
+
   FocusStatus get status => _status;
   FocusPhase get phase => _phase;
   String get id => _id;
   DateTime? get startedAt => _startedAt;
   DateTime? get finishedAt => _finishedAt;
   Duration get intended => _intended;
+  FocusSettings get settings => _settings;
   int get completedFocusSessions => _completedFocusSessions;
+  int get sessionsPerCycle => _settings.sessionsPerCycle;
+
+  bool get hasPlan => _planTarget > 0;
+  int get planTarget => _planTarget;
+  int get planCompleted => _planCompleted;
+  bool get planFinished => hasPlan && _planCompleted >= _planTarget;
+  bool get breakSkipped => _breakSkipped;
   FocusOutcome? get lastOutcome => _lastOutcome;
   bool get isRunning => _status == FocusStatus.running;
   bool get isPaused => _status == FocusStatus.paused;
@@ -307,7 +857,8 @@ class FocusEngine {
       case FocusStatus.paused:
         return _phase == FocusPhase.focus ? 'Paused' : 'Break paused';
       case FocusStatus.completed:
-        return _phase == FocusPhase.focus ? 'Focus complete' : 'Break complete';
+        if (_phase == FocusPhase.focus) return 'Focus complete';
+        return _breakSkipped ? 'Break skipped' : 'Break complete';
       case FocusStatus.cancelled:
         return _phase == FocusPhase.focus
             ? 'Session cancelled'
@@ -315,13 +866,10 @@ class FocusEngine {
     }
   }
 
-  /// A long break follows every fourth completed focus session.
-  FocusPhase get nextBreakPhase {
-    final inCycle = _completedFocusSessions % TimerDefaults.sessionsPerCycle;
-    return _completedFocusSessions > 0 && inCycle == 0
-        ? FocusPhase.longBreak
-        : FocusPhase.shortBreak;
-  }
+  /// The break that follows the block that just completed. Only the plan's
+  /// final block gets a long break; a plan never recurs past its target.
+  FocusPhase get nextBreakPhase =>
+      planFinished ? FocusPhase.longBreak : FocusPhase.shortBreak;
 
   Duration get remaining {
     switch (_status) {
@@ -373,6 +921,10 @@ class FocusEngine {
     _settings = settings;
     if (_status == FocusStatus.idle || _status == FocusStatus.ready) {
       _intended = _settings.durationFor(_phase);
+    } else if (hasPlan) {
+      // Durations may change for the blocks still ahead, but the plan target
+      // and its progress stay fixed until the plan ends.
+      _planSettings = settings;
     }
   }
 
@@ -380,6 +932,15 @@ class FocusEngine {
     if (hasActiveSession) {
       throw StateError('A timer is already running.');
     }
+    if (_status == FocusStatus.completed) {
+      if (_phase == FocusPhase.focus) {
+        throw StateError('Start the break before the next focus.');
+      }
+      if (planFinished) {
+        throw StateError('This plan is complete.');
+      }
+    }
+    if (!hasPlan) _startNewPlan();
     _begin(FocusPhase.focus);
   }
 
@@ -387,13 +948,39 @@ class FocusEngine {
     if (_status != FocusStatus.completed || _phase != FocusPhase.focus) {
       throw StateError('A break can start only after a focus session completes.');
     }
+    if (!hasPlan) {
+      _startNewPlan();
+      _planCompleted = 1;
+    }
     _begin(nextBreakPhase);
   }
 
+  /// Skips the pending break without running a timer or recording an outcome.
+  /// The plan keeps its progress and offers the next block or Done.
   void skipBreak() {
     if (_status != FocusStatus.completed || _phase != FocusPhase.focus) {
       throw StateError('No completed focus session is waiting for a break.');
     }
+    if (!hasPlan) {
+      _startNewPlan();
+      _planCompleted = 1;
+    }
+    _phase = nextBreakPhase;
+    _breakSkipped = true;
+    _finishedAt = _clock.nowUtc();
+    _lastOutcome = null;
+  }
+
+  /// Leaves the active plan for setup through End plan or Done. No outcome is
+  /// emitted: every completed focus block was already delivered to the host.
+  void endPlan() {
+    if (hasActiveSession) {
+      throw StateError('Finish the running session before ending the plan.');
+    }
+    if (!hasPlan) {
+      throw StateError('No plan is active.');
+    }
+    _resetPlan();
     _phase = FocusPhase.focus;
     _status = FocusStatus.ready;
     _id = '';
@@ -403,6 +990,28 @@ class FocusEngine {
     _intended = _settings.durationFor(_phase);
     _accumulated = Duration.zero;
     _pausedRemaining = Duration.zero;
+    _runStartedMono = _clock.monotonic();
+    _lastOutcome = null;
+  }
+
+  /// Captures a fresh finite plan from the settings in force at its start.
+  void _startNewPlan() {
+    final target = _settings.sessionsPerCycle;
+    _planTarget = target < FocusSettings.minSessionsPerCycle
+        ? FocusSettings.minSessionsPerCycle
+        : (target > FocusSettings.maxSessionsPerCycle
+              ? FocusSettings.maxSessionsPerCycle
+              : target);
+    _planCompleted = 0;
+    _planSettings = _settings;
+    _breakSkipped = false;
+  }
+
+  void _resetPlan() {
+    _planTarget = 0;
+    _planCompleted = 0;
+    _planSettings = null;
+    _breakSkipped = false;
   }
 
   FocusOutcome? pause() {
@@ -433,7 +1042,11 @@ class FocusEngine {
     if (!hasActiveSession) {
       throw StateError('No active session can be cancelled.');
     }
-    return _finish(completed: false);
+    final outcome = _finish(completed: false);
+    // A confirmed abandonment clears the plan, so one-off settings cannot leak
+    // into a later plan.
+    _resetPlan();
+    return outcome;
   }
 
   /// Returns an outcome exactly once when a running session reaches zero.
@@ -457,6 +1070,10 @@ class FocusEngine {
       remaining: _status == FocusStatus.paused ? _pausedRemaining : null,
       finishedAt: _finishedAt,
       completedFocusSessions: _completedFocusSessions,
+      planTarget: _planTarget,
+      planCompleted: _planCompleted,
+      planSettings: _planSettings,
+      breakSkipped: _breakSkipped,
     );
   }
 
@@ -464,9 +1081,14 @@ class FocusEngine {
 
   void _begin(FocusPhase phase) {
     final now = _clock.nowUtc();
-    final intended = _settings.durationFor(phase);
+    final intended = (_planSettings ?? _settings).durationFor(phase);
     if (intended <= Duration.zero) {
       throw StateError('${phase.label} duration must be positive.');
+    }
+    if (phase == FocusPhase.focus) {
+      // A skipped break belongs to the block that just finished, not to the
+      // next focus block.
+      _breakSkipped = false;
     }
     _phase = phase;
     _intended = intended;
@@ -494,6 +1116,10 @@ class FocusEngine {
     _status = completed ? FocusStatus.completed : FocusStatus.cancelled;
     if (completed && _phase == FocusPhase.focus) {
       _completedFocusSessions += 1;
+      if (hasPlan && _planCompleted < _planTarget) {
+        _planCompleted += 1;
+      }
+      _breakSkipped = false;
     }
     final outcome = FocusOutcome(
       id: _id,
@@ -513,11 +1139,13 @@ class FocusEngine {
     switch (snapshot.status) {
       case FocusStatus.idle:
       case FocusStatus.ready:
+        _resetPlan();
         _phase = snapshot.phase;
         _status = snapshot.status;
         _intended = _settings.durationFor(_phase);
         return;
       case FocusStatus.running:
+        _adoptRestoredPlan(snapshot);
         _phase = snapshot.phase;
         _id = snapshot.id;
         _startedAt = snapshot.startedAt;
@@ -538,6 +1166,7 @@ class FocusEngine {
         _runStartedMono = _clock.monotonic();
         return;
       case FocusStatus.paused:
+        _adoptRestoredPlan(snapshot);
         _phase = snapshot.phase;
         _id = snapshot.id;
         _startedAt = snapshot.startedAt;
@@ -548,12 +1177,12 @@ class FocusEngine {
         _status = FocusStatus.paused;
         return;
       case FocusStatus.completed:
+        _adoptRestoredPlan(snapshot);
         _phase = snapshot.phase;
         _id = snapshot.id;
         _startedAt = snapshot.startedAt;
         _anchor = snapshot.anchor;
         _intended = snapshot.intended;
-        _accumulated = _intended;
         _status = FocusStatus.completed;
         final startedAt = snapshot.startedAt ?? snapshot.finishedAt!;
         final savedFinishedAt = snapshot.finishedAt!;
@@ -561,21 +1190,62 @@ class FocusEngine {
             ? startedAt
             : savedFinishedAt;
         _finishedAt = finishedAt;
-        _lastOutcome = FocusOutcome(
-          id: snapshot.id,
-          startedAt: startedAt,
-          finishedAt: finishedAt,
-          intended: snapshot.intended,
-          actual: snapshot.intended,
-          completed: true,
-        );
+        if (_breakSkipped) {
+          // A skipped break never ran, so it has no elapsed time or outcome.
+          _accumulated = Duration.zero;
+          _lastOutcome = null;
+        } else {
+          _accumulated = _intended;
+          _lastOutcome = FocusOutcome(
+            id: snapshot.id,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            intended: snapshot.intended,
+            actual: snapshot.intended,
+            completed: true,
+          );
+        }
         return;
       case FocusStatus.cancelled:
+        _resetPlan();
         _phase = FocusPhase.focus;
         _status = FocusStatus.ready;
         _intended = _settings.durationFor(_phase);
         return;
     }
+  }
+
+  /// Restores the active plan. A v3 snapshot carries its own target and
+  /// settings; a legacy snapshot only proves the blocks implied by its state,
+  /// never its lifetime focus count.
+  void _adoptRestoredPlan(FocusSnapshot snapshot) {
+    final target = snapshot.planTarget;
+    if (target != null && target > 0) {
+      _planTarget = target > FocusSettings.maxSessionsPerCycle
+          ? FocusSettings.maxSessionsPerCycle
+          : target;
+      final completed = snapshot.planCompleted;
+      _planCompleted = completed < 0
+          ? 0
+          : (completed > _planTarget ? _planTarget : completed);
+      _planSettings = snapshot.planSettings ?? _settings;
+      _breakSkipped = snapshot.breakSkipped &&
+          snapshot.status == FocusStatus.completed &&
+          snapshot.phase.isBreak;
+      return;
+    }
+    final rawTarget = _settings.sessionsPerCycle;
+    _planTarget = rawTarget < FocusSettings.minSessionsPerCycle
+        ? FocusSettings.minSessionsPerCycle
+        : (rawTarget > FocusSettings.maxSessionsPerCycle
+              ? FocusSettings.maxSessionsPerCycle
+              : rawTarget);
+    _planSettings = _settings;
+    final proved = snapshot.phase == FocusPhase.focus
+        ? (snapshot.status == FocusStatus.completed ? 1 : 0)
+        : 1;
+    _planCompleted = proved > _planTarget ? _planTarget : proved;
+    _breakSkipped = false;
   }
 
   String _newId() {

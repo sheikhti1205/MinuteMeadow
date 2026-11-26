@@ -8,7 +8,7 @@ Clips are timed data. A looping clip returns to its start; a one-shot clip emits
 
 Movement and hitboxes belong to the scene, not the artwork. A ball can follow a scripted trajectory while an actor moves to intercept it. The scene emits catch and return events; the rig determines which frames or transforms to display.
 
-In a debug build, open **Settings → Animation laboratory** and choose **Run route** to exercise walking, running, and jumping. Turn on **Hitboxes** to see the interaction bounds move with the actor. If the rig supplies `walk`, `run`, or `jump` clips, the lab plays them during the corresponding movement.
+In a build compiled with `COMPANION_FOCUS_DEVELOPMENT_TOOLS` enabled, open **Settings → Animation laboratory** and choose **Run route** to exercise walking, running, and jumping. Turn on **Hitboxes** to see the interaction bounds move with the actor. If the rig supplies `walk`, `run`, or `jump` clips, the lab plays them during the corresponding movement.
 
 ## Rig documents
 

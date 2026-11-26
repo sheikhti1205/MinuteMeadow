@@ -432,4 +432,279 @@ void main() {
       );
     });
   });
+
+  group('FocusSettings', () {
+    test('validates ranges and copies the session count', () {
+      expect(const FocusSettings().isValid, isTrue);
+      expect(const FocusSettings(focusMinutes: 0).isValid, isFalse);
+      expect(const FocusSettings(shortBreakMinutes: 61).isValid, isFalse);
+      expect(const FocusSettings(longBreakMinutes: 0).isValid, isFalse);
+      expect(const FocusSettings(sessionsPerCycle: 13).isValid, isFalse);
+
+      final copy = const FocusSettings().copyWith(sessionsPerCycle: 2);
+      expect(copy.sessionsPerCycle, 2);
+      expect(copy.focusMinutes, 25);
+      expect(copy.validationError, isNull);
+    });
+  });
+
+  group('FocusPlanState', () {
+    test('adds, renames, duplicates, deletes and keeps a safe default', () {
+      final initial = FocusPlanState.initial;
+      final added = initial.addPreset(
+        'Writing',
+        const FocusSettings(focusMinutes: 40),
+      );
+      expect(added.presets, hasLength(initial.presets.length + 1));
+      final id = added.selectedId;
+      expect(added.selectedPreset.name, 'Writing');
+      expect(added.defaultId, FocusPreset.defaultsId);
+
+      final renamed = added.renamePreset(id, 'Long writing');
+      expect(renamed.selectedPreset.name, 'Long writing');
+      expect(
+        identical(renamed.renamePreset(id, 'Sprint'), renamed),
+        isTrue,
+      );
+
+      final duplicated = renamed.duplicatePreset(id);
+      expect(duplicated.presets, hasLength(renamed.presets.length + 1));
+      expect(duplicated.selectedPreset.name, 'Long writing copy');
+
+      final defaulted = duplicated.setDefault(id);
+      expect(defaulted.defaultId, id);
+      expect(defaulted.canDelete(id), isFalse);
+      expect(identical(defaulted.deletePreset(id), defaulted), isTrue);
+
+      final deletable = defaulted
+          .setDefault(FocusPreset.defaultsId)
+          .deletePreset(id);
+      expect(deletable.presetById(id), isNull);
+      expect(deletable.selectedPreset.name, 'Long writing copy');
+    });
+
+    test('rejects duplicate and empty preset names', () {
+      const plan = FocusPlanState.initial;
+      expect(plan.validatePresetName(''), isNotNull);
+      expect(plan.validatePresetName('Sprint'), isNotNull);
+      expect(plan.validatePresetName('Sprint', exceptId: 'sprint'), isNull);
+      expect(
+        identical(plan.addPreset('Sprint', const FocusSettings()), plan),
+        isTrue,
+      );
+    });
+
+    test('one-off settings override the selected preset', () {
+      final plan = FocusPlanState.initial.useOneOff(
+        const FocusSettings(focusMinutes: 30, sessionsPerCycle: 3),
+      );
+      expect(plan.isOneOff, isTrue);
+      expect(plan.resolve(_settings).focusMinutes, 30);
+      expect(plan.resolve(_settings).sessionsPerCycle, 3);
+
+      final selected = plan.select(FocusPreset.deepWorkId);
+      expect(selected.isOneOff, isTrue);
+      expect(selected.resolve(_settings).focusMinutes, 30);
+
+      final cleared = selected.clearOneOff();
+      expect(cleared.isOneOff, isFalse);
+      expect(cleared.resolve(_settings).focusMinutes, 50);
+    });
+
+    test('rejects a plan with no usable presets', () {
+      expect(FocusPlanState.tryDecode(null), isNull);
+      expect(
+        FocusPlanState.tryDecode(<String, Object?>{'presets': <Object>[]}),
+        isNull,
+      );
+    });
+  });
+
+  group('focus plan snapshot', () {
+    test('round trips a plan, one-off settings and auto-advance', () {
+      final clock = _FakeClock();
+      final engine = _engine(clock)..prepare();
+      final plan = FocusPlanState.initial
+          .useOneOff(
+            const FocusSettings(focusMinutes: 30, sessionsPerCycle: 3),
+          )
+          .withAutoAdvance(true);
+
+      final decoded = FocusSnapshot.tryDecode(
+        engine.snapshot().encode(plan: plan),
+      );
+
+      expect(decoded, isNotNull);
+      expect(decoded!.plan?.isOneOff, isTrue);
+      expect(decoded.plan?.autoAdvance, isTrue);
+      expect(decoded.plan?.resolve(_settings).focusMinutes, 30);
+      expect(decoded.plan?.resolve(_settings).sessionsPerCycle, 3);
+    });
+
+    test('keeps decoding a version 1 snapshot', () {
+      final decoded = FocusSnapshot.tryDecode(
+        '{"version":1,"id":"","phase":"focus","status":"ready",'
+        '"startedAt":null,"anchor":null,"intendedMs":1500000,'
+        '"completedFocusSessions":0,"preset":"deepWork"}',
+      );
+
+      expect(decoded, isNotNull);
+      expect(decoded!.status, FocusStatus.ready);
+      expect(decoded.plan, isNull);
+      expect(decoded.preset, FocusPreset.deepWork);
+    });
+
+    test('round trips the active plan target, progress and settings', () {
+      final clock = _FakeClock();
+      final engine = FocusEngine(
+        settings: const FocusSettings(
+          focusMinutes: 30,
+          sessionsPerCycle: 2,
+        ),
+        clock: clock,
+      )..prepare()..startFocus();
+      clock.advance(const Duration(minutes: 30));
+      engine.tick();
+
+      final decoded = FocusSnapshot.tryDecode(engine.snapshot().encode());
+      expect(decoded, isNotNull);
+      expect(decoded!.planTarget, 2);
+      expect(decoded.planCompleted, 1);
+      expect(decoded.planSettings?.focusMinutes, 30);
+      expect(decoded.planSettings?.sessionsPerCycle, 2);
+      expect(decoded.breakSkipped, isFalse);
+
+      final restored = FocusEngine(
+        settings: const FocusSettings(),
+        clock: clock,
+        restored: decoded,
+      );
+      expect(restored.planTarget, 2);
+      expect(restored.planCompleted, 1);
+      expect(restored.nextBreakPhase, FocusPhase.shortBreak);
+      restored.startBreak();
+      expect(restored.intended, const Duration(minutes: 5));
+    });
+
+    test('a legacy snapshot never promotes lifetime counts into progress', () {
+      final started = DateTime.utc(2026, 11, 26, 9);
+      final finished = started.add(const Duration(minutes: 25));
+      final legacy = FocusSnapshot.tryDecode(
+        '{"version":2,"id":"legacy","phase":"focus","status":"completed",'
+        '"startedAt":${started.millisecondsSinceEpoch},'
+        '"anchor":${started.millisecondsSinceEpoch},'
+        '"intendedMs":1500000,"remainingMs":null,'
+        '"finishedAt":${finished.millisecondsSinceEpoch},'
+        '"completedFocusSessions":37}',
+      );
+      expect(legacy, isNotNull);
+      expect(legacy!.planTarget, isNull);
+
+      final engine = FocusEngine(
+        settings: const FocusSettings(sessionsPerCycle: 2),
+        clock: _FakeClock(),
+        restored: legacy,
+      );
+      expect(engine.planTarget, 2);
+      expect(engine.planCompleted, 1);
+      expect(engine.nextBreakPhase, FocusPhase.shortBreak);
+    });
+  });
+
+  group('phase transitions', () {
+    test('a plan ends after its configured session count', () {
+      final clock = _FakeClock();
+      final engine = FocusEngine(
+        settings: const FocusSettings(sessionsPerCycle: 2),
+        clock: clock,
+      )..prepare();
+      engine.startFocus();
+      clock.advance(const Duration(minutes: 25));
+      expect(engine.tick(), isNotNull);
+      expect(engine.nextBreakPhase, FocusPhase.shortBreak);
+
+      engine.startBreak();
+      clock.advance(const Duration(minutes: 5));
+      expect(engine.tick(), isNotNull);
+
+      engine.startFocus();
+      clock.advance(const Duration(minutes: 25));
+      expect(engine.tick(), isNotNull);
+      expect(engine.nextBreakPhase, FocusPhase.longBreak);
+      expect(engine.planFinished, isTrue);
+
+      engine.startBreak();
+      expect(engine.phase, FocusPhase.longBreak);
+      clock.advance(const Duration(minutes: 15));
+      expect(engine.tick(), isNotNull);
+      expect(() => engine.startFocus(), throwsStateError);
+    });
+
+    test('ends a completed break back to setup without a new outcome', () {
+      final clock = _FakeClock();
+      final engine = _engine(clock)..prepare()..startFocus();
+      clock.advance(const Duration(minutes: 25));
+      engine.tick();
+      engine.startBreak();
+      clock.advance(const Duration(minutes: 5));
+      expect(engine.tick(), isNotNull);
+      expect(engine.status, FocusStatus.completed);
+
+      engine.endPlan();
+
+      expect(engine.status, FocusStatus.ready);
+      expect(engine.phase, FocusPhase.focus);
+      expect(engine.remaining, const Duration(minutes: 25));
+      expect(engine.lastOutcome, isNull);
+      expect(engine.planTarget, 0);
+      expect(() => engine.endPlan(), throwsStateError);
+    });
+
+    test('a finished plan cannot start another focus block', () {
+      final clock = _FakeClock();
+      final engine = FocusEngine(
+        settings: const FocusSettings(sessionsPerCycle: 1),
+        clock: clock,
+      )..prepare()..startFocus();
+      clock.advance(const Duration(minutes: 25));
+      engine.tick();
+      expect(engine.planFinished, isTrue);
+
+      engine.skipBreak();
+      expect(engine.status, FocusStatus.completed);
+      expect(engine.phase, FocusPhase.longBreak);
+      expect(engine.breakSkipped, isTrue);
+      expect(engine.lastOutcome, isNull);
+      expect(() => engine.startFocus(), throwsStateError);
+
+      engine.endPlan();
+      expect(engine.status, FocusStatus.ready);
+      expect(engine.planTarget, 0);
+      expect(() => engine.endPlan(), throwsStateError);
+    });
+
+    test('skipping a break keeps progress without an outcome', () {
+      final clock = _FakeClock();
+      final engine = FocusEngine(
+        settings: const FocusSettings(sessionsPerCycle: 2),
+        clock: clock,
+      )..prepare()..startFocus();
+      clock.advance(const Duration(minutes: 25));
+      final outcome = engine.tick();
+      expect(outcome?.completed, isTrue);
+      expect(engine.planCompleted, 1);
+
+      engine.skipBreak();
+      expect(engine.status, FocusStatus.completed);
+      expect(engine.phase, FocusPhase.shortBreak);
+      expect(engine.breakSkipped, isTrue);
+      expect(engine.planCompleted, 1);
+      expect(engine.planFinished, isFalse);
+      expect(engine.lastOutcome, isNull);
+
+      engine.startFocus();
+      expect(engine.status, FocusStatus.running);
+      expect(engine.planTarget, 2);
+    });
+  });
 }

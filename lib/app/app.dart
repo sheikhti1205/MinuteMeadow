@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +13,7 @@ import '../core/storage/session_record.dart';
 import '../core/time/suspend_aware_clock.dart';
 import '../core/time/timer_checkpoint.dart';
 import '../design/companion_theme.dart';
+import '../features/clock/clock_engine.dart';
 import '../features/clock/clock_page.dart';
 import '../features/companion/companion_page.dart';
 import '../features/companion/companion_scope.dart';
@@ -27,8 +28,10 @@ import 'branding.dart';
 import 'development_catalogue.dart';
 import 'installed_companion_view.dart';
 
+/// Development tools are opt-in at build time. A debug build alone never
+/// exposes the animation laboratory or the generated catalogue.
 const _showDevelopmentTools =
-    kDebugMode || bool.fromEnvironment('COMPANION_FOCUS_DEVELOPMENT_TOOLS');
+    bool.fromEnvironment('COMPANION_FOCUS_DEVELOPMENT_TOOLS');
 
 class CompanionFocusApp extends ConsumerWidget {
   const CompanionFocusApp({super.key});
@@ -258,18 +261,28 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
         settings = settings.copyWith(notifications: false);
       }
     }
-    await widget.database.replaceData(
-      settings.encode(),
-      backup.sessions,
-      clearPacks: clearPacks,
-    );
+    // A restore replaces settings and history, not the saved timer plans. The
+    // current checkpoints are read here, inside the serialized queue, so a
+    // timer that saved after startup is not replaced by a stale field.
+    final retained = clearPacks ? null : await _retainedTimers(settings);
+    await widget.database.transaction(() async {
+      await widget.database.replaceData(
+        settings.encode(),
+        backup.sessions,
+        clearPacks: clearPacks,
+      );
+      if (retained != null) {
+        await widget.database.writeState('focus', retained.focusCheckpoint);
+        await widget.database.writeState('clock', retained.clockCheckpoint);
+      }
+    });
     final records = await widget.database.sessions();
     if (!mounted) return;
     final previousSession = clearPacks ? _companionSession : null;
     setState(() {
       _timerGeneration++;
-      _focus = null;
-      _clock = null;
+      _focus = retained?.focusSnapshot;
+      _clock = retained?.clockSnapshot;
       _focusDeadline = null;
       _countdownDeadline = null;
       _sessions = records;
@@ -288,6 +301,63 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
       WidgetsBinding.instance.addPostFrameCallback((_) => previousSession.dispose());
     }
   });
+
+  /// Builds idle timer snapshots that keep the saved plans for a restore.
+  ///
+  /// An ordinary restore replaces shared settings and history, not the Focus or
+  /// Clock setup. Only the plan documents survive: a pending one-off plan, a
+  /// running or paused session, stopwatch laps and terminal outcomes are
+  /// dropped. Focus resumes ready, with the restored timer settings as the
+  /// Default preset's fallback, and Clock resumes in its last visible mode with
+  /// its presets and countdown duration intact. Nothing here schedules an
+  /// alert or calls back into a page.
+  Future<({
+    String focusSnapshot,
+    String clockSnapshot,
+    String focusCheckpoint,
+    String clockCheckpoint,
+  })> _retainedTimers(AppSettings settings) async {
+    final storedFocus = await widget.database.readState('focus');
+    final storedClock = await widget.database.readState('clock');
+    final focusSource =
+        TimerCheckpoint.decode(storedFocus)?.snapshot ?? storedFocus;
+    final clockSource =
+        TimerCheckpoint.decode(storedClock)?.snapshot ?? storedClock;
+
+    final plan =
+        (FocusSnapshot.tryDecode(focusSource)?.plan ?? FocusPlanState.initial)
+            .clearOneOff();
+    final focus = FocusEngine(
+      settings: plan.resolve(_focusDefaults(settings)),
+    )..prepare();
+    final focusSnapshot = focus.snapshot().encode(
+      selectedPreset: plan.presetById(plan.selectedId),
+      plan: plan,
+    );
+
+    final clock = ClockEngine(
+      nowMicroseconds: () => _elapsedClock.elapsed.inMicroseconds,
+      initialSnapshot: clockSource,
+      processToken: _clockProcessToken,
+    );
+    final idleMode = clock.mode;
+    clock
+      ..setMode(ClockMode.stopwatch)
+      ..reset()
+      ..setMode(ClockMode.countdown)
+      ..reset()
+      ..setMode(idleMode);
+    final clockSnapshot = clock.snapshot();
+
+    final focusCheckpoint = await TimerCheckpoint.capture(focusSnapshot);
+    final clockCheckpoint = await TimerCheckpoint.capture(clockSnapshot);
+    return (
+      focusSnapshot: focusSnapshot,
+      clockSnapshot: clockSnapshot,
+      focusCheckpoint: focusCheckpoint.encode(),
+      clockCheckpoint: clockCheckpoint.encode(),
+    );
+  }
 
   Future<void> _saveTimer(int generation, String name, String payload) {
     final checkpoint = TimerCheckpoint.capture(payload);
@@ -329,6 +399,67 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
         }
         if (!mounted) return;
         if (outcome.completed) await _completionFeedback();
+      });
+
+  /// Persists label and note text for one saved session.
+  ///
+  /// The timer generation captured when the page was built rejects an edit
+  /// that arrives after data has been restored or cleared. A missing row is
+  /// rejected too, so the history page never reports success for a session
+  /// that is no longer saved. Only the fresh records are adopted; labels and
+  /// notes never reach a log.
+  Future<void> _updateSessionDetails(
+    int generation,
+    String id,
+    SessionDetails details,
+  ) => _write(() async {
+    if (generation != _timerGeneration) {
+      throw StateError('The saved sessions changed.');
+    }
+    if (!_sessions.any((session) => session.id == id)) {
+      throw StateError('That session is no longer saved.');
+    }
+    await widget.database.updateSessionDetails(id, details);
+    final records = await widget.database.sessions();
+    if (generation != _timerGeneration) {
+      throw StateError('The saved sessions changed.');
+    }
+    if (!records.any((record) => record.id == id)) {
+      throw StateError('That session is no longer saved.');
+    }
+    if (!mounted) return;
+    setState(() => _sessions = records);
+  });
+
+  /// Deletes saved sessions in one transaction and adopts the fresh records.
+  ///
+  /// The generation and membership checks reject a stale selection before a
+  /// row is touched: a session that the current library no longer holds cannot
+  /// be deleted. The delete and its row-count check then share one outer
+  /// transaction, so if the count still disagrees the nested deletion is rolled
+  /// back instead of leaving a partial write behind. Fresh records are adopted
+  /// only after the transaction commits and the generation still matches.
+  Future<void> _deleteSessions(int generation, Set<String> ids) =>
+      _write(() async {
+        if (generation != _timerGeneration) {
+          throw StateError('The saved sessions changed.');
+        }
+        if (ids.isEmpty) return;
+        final saved = _sessions.map((session) => session.id).toSet();
+        if (!ids.every(saved.contains)) {
+          throw StateError('Some sessions are no longer saved.');
+        }
+        final records = await widget.database.transaction(() async {
+          final removed = await widget.database.deleteSessions(ids);
+          if (removed != ids.length) {
+            throw StateError('Some sessions were already removed.');
+          }
+          return widget.database.sessions();
+        });
+        if (generation != _timerGeneration) {
+          throw StateError('The saved sessions changed.');
+        }
+        if (mounted) setState(() => _sessions = records);
       });
 
   Future<void> _updateAlarm(
@@ -379,58 +510,6 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
     }
   }
 
-  /// Draws the one shared companion stage used by Focus and Companion.
-  ///
-  /// The library's first pack by id wins, so every surface agrees and the
-  /// choice is stable across rebuilds. Installing, updating or removing a pack
-  /// notifies the session and swaps the stage under a new pack/version key.
-  Widget _sharedStage(
-    BuildContext context, {
-    required double stageHeight,
-    required bool showInteractionControls,
-  }) {
-    return AnimatedBuilder(
-      animation: _companionSession,
-      builder: (context, _) {
-        final packs = _companionSession.library.packs;
-        final pack = packs.isEmpty ? null : packs.first;
-        final useDevelopmentFixture = pack == null && _showDevelopmentTools;
-        final key = pack != null
-            ? ValueKey(('companion-stage', pack.id, pack.version))
-            : useDevelopmentFixture
-            ? const ValueKey('companion-stage-development')
-            : const ValueKey('companion-stage-empty');
-        return InstalledCompanionView(
-          key: key,
-          pack: pack,
-          useDevelopmentFixture: useDevelopmentFixture,
-          stageHeight: stageHeight,
-          showInteractionControls: showInteractionControls,
-          lowPower: _settings.value.lowPower,
-          sound: _settings.value.sound,
-          ambientClip: _companionClip,
-        );
-      },
-    );
-  }
-
-  Widget _focusCompanionStage(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final extent = constraints.biggest.shortestSide;
-        final available = extent.isFinite && extent > 0 ? extent : 200.0;
-        return _sharedStage(
-          context,
-          stageHeight: available,
-          showInteractionControls: false,
-        );
-      },
-    );
-  }
-
-  Widget _companionDestinationStage(BuildContext context) =>
-      _sharedStage(context, stageHeight: 220, showInteractionControls: true);
-
   @override
   Widget build(BuildContext context) {
     final generation = _timerGeneration;
@@ -448,7 +527,6 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
             recoveryNow: widget.data.focusRecoveryNow,
             clock: _focusClock,
             resumeClock: _elapsedClock.resume,
-            companionStageBuilder: _focusCompanionStage,
             onImmersiveChanged: (value) => _immersive.value = value,
             onConfigureTimers: openSettings,
             onSnapshot: (payload) => _saveTimer(generation, 'focus', payload),
@@ -486,7 +564,6 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
             key: ValueKey(('companion', packGeneration)),
             initialSnapshot: _companion,
             onSnapshot: (payload) => _savePacks(packGeneration, payload),
-            stageBuilder: _companionDestinationStage,
             previewBuilder: (context, pack) => InstalledCompanionView(
               key: ValueKey(('companion-preview', pack.id, pack.version)),
               pack: pack,
@@ -498,7 +575,16 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
               ambientClip: _companionClip,
             ),
           ),
-          insights: InsightsPage(sessions: _sessions),
+          insights: InsightsPage(
+            sessions: _sessions,
+            // Both mutations run through the one serialized queue, so a
+            // restored or cleared library rejects a stale edit instead of
+            // writing into the replacement, and the page only reports success
+            // once fresh records have been adopted.
+            onUpdateDetails: (id, details) =>
+                _updateSessionDetails(generation, id, details),
+            onDeleteSessions: (ids) => _deleteSessions(generation, ids),
+          ),
           settings: SettingsPage(
             settings: _settings,
             onSave: _saveSettings,
@@ -509,6 +595,11 @@ class _RunningAppState extends State<_RunningApp> with WidgetsBindingObserver {
               clearPacks: true,
             ),
             notificationsAvailable: TimerNotifications.available,
+            // Report the real Android permission state instead of guessing;
+            // the page only requests access when the user enables alerts.
+            checkNotificationPermission: TimerNotifications.available
+                ? _notifications.hasPermission
+                : null,
             animationLab: _showDevelopmentTools ? (_) => const AnimationLabPage() : null,
             // The marketplace resolves the shared session from the scope, so a
             // reset before opening it is always reflected.

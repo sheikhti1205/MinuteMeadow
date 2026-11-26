@@ -1,5 +1,7 @@
 name: Flutter CI
 
+run-name: "MinuteMeadow CI - run ${{ github.run_number }}.${{ github.run_attempt }} - ${{ github.sha }}"
+
 on:
   push:
     branches: [main]
@@ -34,6 +36,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Resolve the shared build version
+        env:
+          ANDROID_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.build_android == true }}
+        run: python3 tool/ci_version.py
+      - name: Test the build version calculator
+        run: python3 tool/test_ci_version.py
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.44.0'
@@ -45,6 +53,16 @@ jobs:
       - run: flutter pub get --enforce-lockfile
       - run: flutter analyze --fatal-infos
       - run: flutter test
+      - name: Verify the Android build is from current main
+        if: github.event_name == 'workflow_dispatch' && inputs.build_android
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [ "$latest_main" != "$GITHUB_SHA" ]; then
+            echo "::error title=Stale Android build::main is at ${latest_main}, but this run targets ${GITHUB_SHA}. To build this SHA, dispatch a new Android build from the latest main commit so the version code cannot move backwards."
+            exit 1
+          fi
       - name: Prepare SQLite for web
         if: github.event_name == 'workflow_dispatch' && (inputs.build_web || inputs.include_development_tools)
         run: |
@@ -62,7 +80,10 @@ jobs:
           INCLUDE_DEVELOPMENT_TOOLS: ${{ inputs.include_development_tools == true }}
         run: |
           flutter build web --no-web-resources-cdn \
-            --dart-define=COMPANION_FOCUS_DEVELOPMENT_TOOLS="$INCLUDE_DEVELOPMENT_TOOLS"
+            --dart-define=COMPANION_FOCUS_DEVELOPMENT_TOOLS="$INCLUDE_DEVELOPMENT_TOOLS" \
+            --dart-define=APP_VERSION="$VERSION_NAME" \
+            --dart-define=APP_BUILD_NUMBER="$VERSION_CODE" \
+            --dart-define=APP_BUILD_ID="$VERSION_ID"
       - name: Retain the web build
         if: github.event_name == 'workflow_dispatch' && (inputs.build_web || inputs.include_development_tools)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -73,7 +94,13 @@ jobs:
           retention-days: 1
       - name: Build the Android debug APK
         if: github.event_name == 'workflow_dispatch' && inputs.build_android
-        run: flutter build apk --debug
+        run: |
+          flutter build apk --debug \
+            --build-name="$VERSION_ID" \
+            --build-number="$VERSION_CODE" \
+            --dart-define=APP_VERSION="$VERSION_NAME" \
+            --dart-define=APP_BUILD_NUMBER="$VERSION_CODE" \
+            --dart-define=APP_BUILD_ID="$VERSION_ID"
       - name: Retain the Android debug build
         if: github.event_name == 'workflow_dispatch' && inputs.build_android && github.event.repository.private == true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

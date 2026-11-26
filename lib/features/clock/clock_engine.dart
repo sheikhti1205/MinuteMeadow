@@ -37,6 +37,10 @@ class ClockLap {
 /// a background gap, while a restarted process resumes from the saved elapsed
 /// time. A trusted [recoveryNow] wall reference (for example one derived from
 /// Android's `elapsedRealtime`) can bridge the dead gap across a restart.
+///
+/// The stopwatch and the countdown keep separate state. Switching the visible
+/// [mode] never clears either measurement, so a running countdown can keep
+/// counting behind the stopwatch and vice versa.
 class ClockEngine {
   ClockEngine({
     required this.nowMicroseconds,
@@ -66,76 +70,121 @@ class ClockEngine {
   final DateTime Function() wallClock;
 
   ClockMode _mode = ClockMode.stopwatch;
-  bool _running = false;
-  int _accumulatedMicros = 0;
-  int? _startedAtMicros;
+
+  bool _stopwatchRunning = false;
+  int _stopwatchAccumulatedMicros = 0;
+  int? _stopwatchStartedAtMicros;
+
+  bool _countdownRunning = false;
+  int _countdownAccumulatedMicros = 0;
+  int? _countdownStartedAtMicros;
   int _countdownMicros = defaultCountdownMicros;
+
   int _completionCount = 0;
   String? _selectedPresetId;
   final List<ClockPreset> _presets = <ClockPreset>[];
   final List<ClockLap> _laps = <ClockLap>[];
 
   ClockMode get mode => _mode;
-  bool get isRunning => _running;
+
+  /// Whether the visible mode is measuring.
+  bool get isRunning => _mode == ClockMode.stopwatch
+      ? _stopwatchRunning
+      : _countdownRunning;
+
+  bool get isStopwatchRunning => _stopwatchRunning;
+  bool get isCountdownRunning => _countdownRunning;
+
+  /// Whether either measurement is running, so the host keeps ticking.
+  bool get hasRunningMeasurement => _stopwatchRunning || _countdownRunning;
+
   int get completionCount => _completionCount;
   int get countdownMicros => _countdownMicros;
-  Duration get countdownDuration =>
-      Duration(microseconds: _countdownMicros);
+  Duration get countdownDuration => Duration(microseconds: _countdownMicros);
   String? get selectedPresetId => _selectedPresetId;
 
   List<ClockPreset> get presets => List<ClockPreset>.unmodifiable(_presets);
   List<ClockLap> get laps => List<ClockLap>.unmodifiable(_laps);
 
+  /// Elapsed time of the visible mode.
   Duration get elapsed => Duration(microseconds: _elapsedAt(nowMicroseconds()));
 
+  Duration get stopwatchElapsed =>
+      Duration(microseconds: _stopwatchElapsedAt(nowMicroseconds()));
+
+  Duration get countdownElapsed =>
+      Duration(microseconds: _countdownElapsedAt(nowMicroseconds()));
+
+  /// Remaining countdown time, independent of the visible mode so a host can
+  /// keep a scheduled alert anchored while the stopwatch is shown.
   Duration get remaining {
-    if (_mode != ClockMode.countdown) {
-      return Duration.zero;
-    }
-    final value = _countdownMicros - _elapsedAt(nowMicroseconds());
+    final value = _countdownMicros - _countdownElapsedAt(nowMicroseconds());
     return Duration(microseconds: value > 0 ? value : 0);
   }
 
-  bool get isComplete =>
-      _mode == ClockMode.countdown &&
-      _elapsedAt(nowMicroseconds()) >= _countdownMicros;
+  bool get isCountdownComplete =>
+      _countdownElapsedAt(nowMicroseconds()) >= _countdownMicros;
 
-  bool get hasProgress => _elapsedAt(nowMicroseconds()) > 0 || _laps.isNotEmpty;
+  bool get isComplete =>
+      _mode == ClockMode.countdown && isCountdownComplete;
+
+  bool get stopwatchHasProgress =>
+      _stopwatchElapsedAt(nowMicroseconds()) > 0 || _laps.isNotEmpty;
+
+  bool get countdownHasProgress =>
+      _countdownElapsedAt(nowMicroseconds()) > 0;
+
+  bool get hasProgress => _mode == ClockMode.stopwatch
+      ? stopwatchHasProgress
+      : countdownHasProgress;
 
   void start() {
-    if (_running) {
+    if (_mode == ClockMode.stopwatch) {
+      if (_stopwatchRunning) {
+        return;
+      }
+      _stopwatchStartedAtMicros = nowMicroseconds();
+      _stopwatchRunning = true;
+      return;
+    }
+    if (_countdownRunning) {
       return;
     }
     final now = nowMicroseconds();
-    if (_mode == ClockMode.countdown && _elapsedAt(now) >= _countdownMicros) {
-      _accumulatedMicros = 0;
-      _laps.clear();
+    if (_countdownElapsedAt(now) >= _countdownMicros) {
+      _countdownAccumulatedMicros = 0;
+      _countdownStartedAtMicros = null;
     }
-    _startedAtMicros = now;
-    _running = true;
+    _countdownStartedAtMicros = now;
+    _countdownRunning = true;
   }
 
   void pause() {
-    if (!_running) {
-      return;
-    }
-    if (_mode == ClockMode.countdown) {
-      final now = nowMicroseconds();
-      final startedAt = _startedAtMicros;
-      final raw = _accumulatedMicros +
-          (startedAt != null && now > startedAt ? now - startedAt : 0);
-      if (raw >= _countdownMicros) {
-        update();
+    if (_mode == ClockMode.stopwatch) {
+      if (!_stopwatchRunning) {
         return;
       }
+      _stopwatchAccumulatedMicros = _stopwatchElapsedAt(nowMicroseconds());
+      _stopwatchStartedAtMicros = null;
+      _stopwatchRunning = false;
+      return;
     }
-    _accumulatedMicros = _elapsedAt(nowMicroseconds());
-    _startedAtMicros = null;
-    _running = false;
+    if (!_countdownRunning) {
+      return;
+    }
+    final now = nowMicroseconds();
+    final raw = _countdownElapsedAt(now);
+    if (raw >= _countdownMicros) {
+      update();
+      return;
+    }
+    _countdownAccumulatedMicros = raw;
+    _countdownStartedAtMicros = null;
+    _countdownRunning = false;
   }
 
   void toggle() {
-    if (_running) {
+    if (isRunning) {
       pause();
     } else {
       start();
@@ -144,56 +193,77 @@ class ClockEngine {
 
   /// Settles a countdown that has reached its duration.
   ///
-  /// Completion fires the optional callback exactly once. A timer that is
-  /// already stopped, or a stopwatch, is left untouched.
+  /// Completion fires the optional callback exactly once, even when the
+  /// stopwatch is the visible mode. A timer that is already stopped is left
+  /// untouched.
   void update() {
-    if (!_running || _mode != ClockMode.countdown) {
+    if (!_countdownRunning) {
       return;
     }
-    final startedAt = _startedAtMicros;
+    final startedAt = _countdownStartedAtMicros;
     if (startedAt == null) {
       return;
     }
     final now = nowMicroseconds();
-    final raw =
-        _accumulatedMicros + (now > startedAt ? now - startedAt : 0);
+    final raw = _countdownAccumulatedMicros +
+        (now > startedAt ? now - startedAt : 0);
     if (raw < _countdownMicros) {
       return;
     }
-    _accumulatedMicros = _countdownMicros;
-    _startedAtMicros = null;
-    _running = false;
+    _countdownAccumulatedMicros = _countdownMicros;
+    _countdownStartedAtMicros = null;
+    _countdownRunning = false;
     _completionCount++;
     onCountdownComplete?.call();
   }
 
+  /// Clears the visible measurement only; the other mode keeps its work.
   void reset() {
-    _running = false;
-    _startedAtMicros = null;
-    _accumulatedMicros = 0;
-    _laps.clear();
-  }
-
-  void setMode(ClockMode mode) {
-    if (mode == _mode) {
+    if (_mode == ClockMode.stopwatch) {
+      _stopwatchRunning = false;
+      _stopwatchStartedAtMicros = null;
+      _stopwatchAccumulatedMicros = 0;
+      _laps.clear();
       return;
     }
-    _mode = mode;
-    _running = false;
-    _startedAtMicros = null;
-    _accumulatedMicros = 0;
-    _laps.clear();
+    _countdownRunning = false;
+    _countdownStartedAtMicros = null;
+    _countdownAccumulatedMicros = 0;
   }
 
-  /// Sets the countdown duration and returns to a ready state.
+  /// Shows [mode] without clearing either measurement.
+  ///
+  /// The page owns any confirmation for replacing a countdown duration; a
+  /// mode switch on its own is always non-destructive.
+  void setMode(ClockMode mode) {
+    _mode = mode;
+  }
+
+  /// Sets the countdown duration and returns the countdown to a ready state.
+  ///
+  /// The stopwatch and its laps are untouched.
   void setCountdownDuration(Duration duration) {
     _mode = ClockMode.countdown;
     _countdownMicros = _clampDuration(duration.inMicroseconds);
-    _running = false;
-    _startedAtMicros = null;
-    _accumulatedMicros = 0;
-    _laps.clear();
+    _countdownRunning = false;
+    _countdownStartedAtMicros = null;
+    _countdownAccumulatedMicros = 0;
     _selectedPresetId = null;
+  }
+
+  /// Restarts a completed countdown using its original duration.
+  ///
+  /// Returns false when the countdown has not reached zero, so the explicit
+  /// Repeat action cannot silently discard remaining time.
+  bool repeatCountdown() {
+    if (!isCountdownComplete) {
+      return false;
+    }
+    _mode = ClockMode.countdown;
+    _countdownAccumulatedMicros = 0;
+    _countdownStartedAtMicros = nowMicroseconds();
+    _countdownRunning = true;
+    return true;
   }
 
   ClockPreset addPreset({
@@ -209,6 +279,40 @@ class ClockEngine {
     );
     _presets.add(preset);
     return preset;
+  }
+
+  /// Renames or re-times an existing preset.
+  ///
+  /// A ready countdown that uses the preset adopts the new duration. A
+  /// countdown with progress keeps its current duration, and the selection is
+  /// cleared so the saved preset no longer claims to describe it.
+  bool updatePreset({
+    required String id,
+    required String label,
+    required Duration duration,
+  }) {
+    final index = _presets.indexWhere((preset) => preset.id == id);
+    if (index < 0) {
+      return false;
+    }
+    final previous = _presets[index];
+    final micros = _clampDuration(duration.inMicroseconds);
+    final trimmed = label.trim();
+    _presets[index] = ClockPreset(
+      id: id,
+      label: trimmed.isEmpty ? _defaultPresetLabel(micros) : trimmed,
+      durationMicros: micros,
+    );
+    if (_selectedPresetId == id && micros != previous.durationMicros) {
+      final untouched =
+          !_countdownRunning && _countdownElapsedAt(nowMicroseconds()) == 0;
+      if (untouched) {
+        _countdownMicros = micros;
+      } else {
+        _selectedPresetId = null;
+      }
+    }
+    return true;
   }
 
   bool deletePreset(String id) {
@@ -232,10 +336,10 @@ class ClockEngine {
   }
 
   ClockLap? addLap() {
-    if (_mode != ClockMode.stopwatch || !_running) {
+    if (!_stopwatchRunning) {
       return null;
     }
-    final total = _elapsedAt(nowMicroseconds());
+    final total = _stopwatchElapsedAt(nowMicroseconds());
     final previous = _laps.isEmpty ? 0 : _laps.last.totalMicros;
     final lap = ClockLap(
       index: _laps.length + 1,
@@ -249,15 +353,25 @@ class ClockEngine {
   String snapshot() {
     final now = nowMicroseconds();
     return jsonEncode(<String, Object?>{
-      'version': 1,
+      'version': 2,
       'mode': _mode.name,
-      'running': _running,
+      // Top-level running and accumulated fields keep older readers working
+      // for the visible mode.
+      'running': isRunning,
       'accumulatedMicros': _elapsedAt(now),
       'savedAtMicros': now,
       'savedAtUtcMicros': wallClock().toUtc().microsecondsSinceEpoch,
       'process': processToken,
       'countdownMicros': _countdownMicros,
       'selectedPresetId': _selectedPresetId,
+      'stopwatch': <String, Object?>{
+        'running': _stopwatchRunning,
+        'accumulatedMicros': _stopwatchElapsedAt(now),
+      },
+      'countdown': <String, Object?>{
+        'running': _countdownRunning,
+        'accumulatedMicros': _countdownElapsedAt(now),
+      },
       'laps': <Map<String, Object?>>[
         for (final lap in _laps)
           <String, Object?>{
@@ -277,13 +391,26 @@ class ClockEngine {
     });
   }
 
-  int _elapsedAt(int now) {
-    var value = _accumulatedMicros;
-    final startedAt = _startedAtMicros;
-    if (_running && startedAt != null && now > startedAt) {
+  int _elapsedAt(int now) => _mode == ClockMode.stopwatch
+      ? _stopwatchElapsedAt(now)
+      : _countdownElapsedAt(now);
+
+  int _stopwatchElapsedAt(int now) {
+    var value = _stopwatchAccumulatedMicros;
+    final startedAt = _stopwatchStartedAtMicros;
+    if (_stopwatchRunning && startedAt != null && now > startedAt) {
       value += now - startedAt;
     }
-    if (_mode == ClockMode.countdown && value > _countdownMicros) {
+    return value;
+  }
+
+  int _countdownElapsedAt(int now) {
+    var value = _countdownAccumulatedMicros;
+    final startedAt = _countdownStartedAtMicros;
+    if (_countdownRunning && startedAt != null && now > startedAt) {
+      value += now - startedAt;
+    }
+    if (value > _countdownMicros) {
       value = _countdownMicros;
     }
     return value;
@@ -308,11 +435,26 @@ class ClockEngine {
   }
 
   String _defaultPresetLabel(int micros) {
-    final minutes = micros ~/ Duration.microsecondsPerMinute;
-    if (minutes >= 1) {
-      return '$minutes min';
+    final duration = Duration(microseconds: micros);
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % Duration.minutesPerHour;
+    final seconds = duration.inSeconds % Duration.secondsPerMinute;
+    if (hours > 0) {
+      if (minutes == 0 && seconds == 0) {
+        return '$hours h';
+      }
+      if (seconds == 0) {
+        return '$hours h $minutes min';
+      }
+      return '$hours h $minutes min $seconds sec';
     }
-    return '${micros ~/ Duration.microsecondsPerSecond} sec';
+    if (minutes >= 1) {
+      if (seconds == 0) {
+        return '$minutes min';
+      }
+      return '$minutes min $seconds sec';
+    }
+    return '$seconds sec';
   }
 
   void _restore(String? source, DateTime? recoveryNow) {
@@ -412,52 +554,111 @@ class ClockEngine {
       _selectedPresetId = selectedPreset;
     }
 
-    final accumulated = decoded['accumulatedMicros'];
-    if (accumulated is! num) {
-      return;
-    }
-
     final now = nowMicroseconds();
-    var restoredElapsed = accumulated.toInt();
-    if (restoredElapsed < 0) {
-      restoredElapsed = 0;
-    }
-    if (_mode == ClockMode.countdown &&
-        restoredElapsed > _countdownMicros) {
-      restoredElapsed = _countdownMicros;
+    final savedAt = decoded['savedAtMicros'];
+    final savedAtMicros = savedAt is num ? savedAt.toInt() : null;
+    final savedAtUtc = decoded['savedAtUtcMicros'];
+    final savedAtUtcMicros = savedAtUtc is num ? savedAtUtc.toInt() : null;
+    final sameProcess =
+        decoded['process'] is String && decoded['process'] == processToken;
+
+    final version = decoded['version'] is num
+        ? (decoded['version'] as num).toInt()
+        : 1;
+
+    Object? stopwatchRaw;
+    Object? countdownRaw;
+    if (version >= 2) {
+      stopwatchRaw = decoded['stopwatch'];
+      countdownRaw = decoded['countdown'];
+    } else {
+      final legacy = <String, Object?>{
+        'running': decoded['running'],
+        'accumulatedMicros': decoded['accumulatedMicros'],
+      };
+      if (restoredMode == ClockMode.stopwatch) {
+        stopwatchRaw = legacy;
+      } else {
+        countdownRaw = legacy;
+      }
     }
 
-    var running = decoded['running'] == true;
+    final stopwatch = _restoreMeasurement(
+      stopwatchRaw,
+      now: now,
+      isCountdown: false,
+      sameProcess: sameProcess,
+      savedAtMicros: savedAtMicros,
+      savedAtUtcMicros: savedAtUtcMicros,
+      recoveryNow: recoveryNow,
+    );
+    _stopwatchAccumulatedMicros = stopwatch.accumulated;
+    _stopwatchRunning = stopwatch.running;
+    _stopwatchStartedAtMicros = stopwatch.running ? now : null;
+
+    final countdownRestored = _restoreMeasurement(
+      countdownRaw,
+      now: now,
+      isCountdown: true,
+      sameProcess: sameProcess,
+      savedAtMicros: savedAtMicros,
+      savedAtUtcMicros: savedAtUtcMicros,
+      recoveryNow: recoveryNow,
+    );
+    _countdownAccumulatedMicros = countdownRestored.accumulated;
+    _countdownRunning = countdownRestored.running;
+    _countdownStartedAtMicros = countdownRestored.running ? now : null;
+  }
+
+  ({int accumulated, bool running}) _restoreMeasurement(
+    Object? raw, {
+    required int now,
+    required bool isCountdown,
+    required bool sameProcess,
+    required int? savedAtMicros,
+    required int? savedAtUtcMicros,
+    required DateTime? recoveryNow,
+  }) {
+    var accumulated = 0;
+    var running = false;
+    if (raw is Map<Object?, Object?>) {
+      final value = raw['accumulatedMicros'];
+      if (value is num) {
+        accumulated = value.toInt();
+      }
+      running = raw['running'] == true;
+    }
+    if (accumulated < 0) {
+      accumulated = 0;
+    }
+
     if (running) {
-      final savedAt = decoded['savedAtMicros'];
-      final sameProcess =
-          decoded['process'] is String && decoded['process'] == processToken;
       var bridged = false;
       if (sameProcess) {
-        if (savedAt is num && now > savedAt.toInt()) {
-          restoredElapsed += now - savedAt.toInt();
+        if (savedAtMicros != null && now > savedAtMicros) {
+          accumulated += now - savedAtMicros;
         }
         bridged = true;
       }
-      if (!bridged && recoveryNow != null) {
-        final savedAtUtc = decoded['savedAtUtcMicros'];
-        if (savedAtUtc is num) {
-          final gap = recoveryNow.toUtc().microsecondsSinceEpoch -
-              savedAtUtc.toInt();
-          if (gap > 0) {
-            restoredElapsed += gap;
-          }
+      if (!bridged && recoveryNow != null && savedAtUtcMicros != null) {
+        final gap = recoveryNow.toUtc().microsecondsSinceEpoch -
+            savedAtUtcMicros;
+        if (gap > 0) {
+          accumulated += gap;
         }
       }
-      if (_mode == ClockMode.countdown &&
-          restoredElapsed >= _countdownMicros) {
-        restoredElapsed = _countdownMicros;
+    }
+
+    if (isCountdown) {
+      if (accumulated > _countdownMicros) {
+        accumulated = _countdownMicros;
+      }
+      if (running && accumulated >= _countdownMicros) {
+        accumulated = _countdownMicros;
         running = false;
       }
     }
 
-    _accumulatedMicros = restoredElapsed;
-    _running = running;
-    _startedAtMicros = running ? now : null;
+    return (accumulated: accumulated, running: running);
   }
 }

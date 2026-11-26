@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:companion_focus/features/clock/clock_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -131,6 +133,124 @@ void main() {
       expect(engine.isRunning, isTrue);
       expect(engine.remaining, const Duration(seconds: 5));
     });
+
+    test('repeat restarts the original duration after expiry', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      engine.setCountdownDuration(const Duration(seconds: 5));
+      engine.start();
+      clock.advance(const Duration(seconds: 6));
+      engine.update();
+
+      expect(engine.isCountdownComplete, isTrue);
+      expect(engine.repeatCountdown(), isTrue);
+      expect(engine.isCountdownRunning, isTrue);
+      expect(engine.countdownDuration, const Duration(seconds: 5));
+      expect(engine.remaining, const Duration(seconds: 5));
+
+      clock.advance(const Duration(seconds: 1));
+      expect(engine.remaining, const Duration(seconds: 4));
+    });
+
+    test('repeat refuses to discard remaining time', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      engine.setCountdownDuration(const Duration(seconds: 5));
+      engine.start();
+      clock.advance(const Duration(seconds: 1));
+
+      expect(engine.repeatCountdown(), isFalse);
+      expect(engine.remaining, const Duration(seconds: 4));
+    });
+  });
+
+  group('mode state', () {
+    test('switching modes preserves the stopwatch and its laps', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      engine.start();
+      clock.advance(const Duration(seconds: 3));
+      engine.addLap();
+      engine.pause();
+
+      engine.setMode(ClockMode.countdown);
+      expect(engine.elapsed, Duration.zero);
+      expect(engine.stopwatchElapsed, const Duration(seconds: 3));
+      expect(engine.laps, hasLength(1));
+
+      engine.setMode(ClockMode.stopwatch);
+      expect(engine.elapsed, const Duration(seconds: 3));
+      expect(engine.hasProgress, isTrue);
+      expect(engine.laps, hasLength(1));
+    });
+
+    test('switching modes preserves countdown progress', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      engine.setCountdownDuration(const Duration(minutes: 10));
+      engine.start();
+      clock.advance(const Duration(minutes: 1));
+      engine.pause();
+
+      engine.setMode(ClockMode.stopwatch);
+      expect(engine.countdownElapsed, const Duration(minutes: 1));
+      expect(engine.remaining, const Duration(minutes: 9));
+
+      engine.setMode(ClockMode.countdown);
+      expect(engine.elapsed, const Duration(minutes: 1));
+      expect(engine.remaining, const Duration(minutes: 9));
+    });
+
+    test('a hidden running countdown still completes exactly once', () {
+      final clock = FakeMonotonicClock();
+      var completions = 0;
+      final engine = ClockEngine(
+        nowMicroseconds: clock.now,
+        onCountdownComplete: () => completions++,
+      );
+
+      engine.start();
+      clock.advance(const Duration(seconds: 2));
+      engine.setMode(ClockMode.countdown);
+      engine.setCountdownDuration(const Duration(seconds: 5));
+      engine.start();
+      clock.advance(const Duration(seconds: 6));
+
+      expect(engine.isStopwatchRunning, isTrue);
+      engine.update();
+
+      expect(completions, 1);
+      expect(engine.isCountdownRunning, isFalse);
+      expect(engine.isCountdownComplete, isTrue);
+      expect(engine.stopwatchElapsed, const Duration(seconds: 8));
+
+      engine.setMode(ClockMode.stopwatch);
+      expect(engine.elapsed, const Duration(seconds: 8));
+      engine.update();
+      expect(completions, 1);
+    });
+
+    test('reset only clears the visible measurement', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      engine.start();
+      clock.advance(const Duration(seconds: 4));
+      engine.setMode(ClockMode.countdown);
+      engine.setCountdownDuration(const Duration(minutes: 5));
+      engine.start();
+      clock.advance(const Duration(seconds: 2));
+      engine.reset();
+
+      expect(engine.countdownElapsed, Duration.zero);
+      expect(engine.countdownHasProgress, isFalse);
+      expect(engine.stopwatchElapsed, const Duration(seconds: 6));
+      expect(engine.isStopwatchRunning, isTrue);
+    });
   });
 
   group('presets', () {
@@ -160,6 +280,108 @@ void main() {
       restored.deletePreset(preset.id);
       expect(restored.presets, isEmpty);
       expect(restored.selectedPresetId, isNull);
+    });
+
+    test('renames and re-times a preset', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      final preset = engine.addPreset(
+        label: 'Focus',
+        duration: const Duration(minutes: 5),
+      );
+      expect(
+        engine.updatePreset(
+          id: preset.id,
+          label: 'Deep work',
+          duration: const Duration(hours: 1, minutes: 30),
+        ),
+        isTrue,
+      );
+
+      expect(engine.presets.single.label, 'Deep work');
+      expect(
+        engine.presets.single.durationMicros,
+        const Duration(hours: 1, minutes: 30).inMicroseconds,
+      );
+    });
+
+    test('a ready selected preset adopts an edited duration', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      final preset = engine.addPreset(
+        label: 'Focus',
+        duration: const Duration(minutes: 5),
+      );
+      engine.selectPreset(preset.id);
+      engine.updatePreset(
+        id: preset.id,
+        label: 'Focus',
+        duration: const Duration(minutes: 15),
+      );
+
+      expect(engine.countdownDuration, const Duration(minutes: 15));
+      expect(engine.selectedPresetId, preset.id);
+    });
+
+    test('an active selected preset keeps its duration when edited', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      final preset = engine.addPreset(
+        label: 'Focus',
+        duration: const Duration(minutes: 5),
+      );
+      engine.selectPreset(preset.id);
+      engine.start();
+      clock.advance(const Duration(minutes: 1));
+
+      engine.updatePreset(
+        id: preset.id,
+        label: 'Long focus',
+        duration: const Duration(minutes: 20),
+      );
+
+      expect(engine.countdownDuration, const Duration(minutes: 5));
+      expect(engine.countdownElapsed, const Duration(minutes: 1));
+      expect(engine.selectedPresetId, isNull);
+      expect(engine.presets.single.label, 'Long focus');
+    });
+
+    test('deleting a selected preset leaves the countdown running intact', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      final preset = engine.addPreset(
+        label: 'Focus',
+        duration: const Duration(minutes: 5),
+      );
+      engine.selectPreset(preset.id);
+      engine.start();
+      clock.advance(const Duration(seconds: 30));
+
+      expect(engine.deletePreset(preset.id), isTrue);
+      expect(engine.selectedPresetId, isNull);
+      expect(engine.isCountdownRunning, isTrue);
+      expect(engine.remaining, const Duration(minutes: 4, seconds: 30));
+    });
+
+    test('builds readable default labels for long durations', () {
+      final clock = FakeMonotonicClock();
+      final engine = ClockEngine(nowMicroseconds: clock.now);
+
+      final hours = engine.addPreset(
+        label: '',
+        duration: const Duration(hours: 1, minutes: 30),
+      );
+      expect(hours.label, '1 h 30 min');
+
+      final seconds = engine.addPreset(
+        label: '   ',
+        duration: const Duration(seconds: 45),
+      );
+      expect(seconds.label, '45 sec');
     });
   });
 
@@ -353,6 +575,96 @@ void main() {
       expect(restored.laps[1].splitMicros, 2000000);
     });
 
+    test('a version 2 snapshot keeps both modes', () {
+      final clock = FakeMonotonicClock();
+      final running = ClockEngine(
+        nowMicroseconds: clock.now,
+        processToken: 'session-a',
+      );
+
+      running.start();
+      clock.advance(const Duration(seconds: 2));
+      running.addLap();
+      running.setMode(ClockMode.countdown);
+      running.setCountdownDuration(const Duration(minutes: 1));
+      running.start();
+      clock.advance(const Duration(seconds: 3));
+      final snapshot = running.snapshot();
+
+      final restored = ClockEngine(
+        nowMicroseconds: clock.now,
+        initialSnapshot: snapshot,
+        processToken: 'session-a',
+      );
+
+      expect(restored.mode, ClockMode.countdown);
+      expect(restored.stopwatchElapsed, const Duration(seconds: 5));
+      expect(restored.isStopwatchRunning, isTrue);
+      expect(restored.laps, hasLength(1));
+      expect(restored.countdownElapsed, const Duration(seconds: 3));
+      expect(restored.isCountdownRunning, isTrue);
+    });
+
+    test('a version 1 countdown snapshot still restores', () {
+      final clock = FakeMonotonicClock();
+      final legacy = jsonEncode(<String, Object?>{
+        'version': 1,
+        'mode': 'countdown',
+        'running': false,
+        'accumulatedMicros': 120000000,
+        'savedAtMicros': 0,
+        'savedAtUtcMicros': 0,
+        'process': 'legacy',
+        'countdownMicros': 600000000,
+        'selectedPresetId': null,
+        'laps': <Object?>[],
+        'presets': <Object?>[],
+      });
+
+      final engine = ClockEngine(
+        nowMicroseconds: clock.now,
+        initialSnapshot: legacy,
+      );
+
+      expect(engine.mode, ClockMode.countdown);
+      expect(engine.countdownDuration, const Duration(minutes: 10));
+      expect(engine.remaining, const Duration(minutes: 8));
+      expect(engine.isCountdownRunning, isFalse);
+      expect(engine.stopwatchElapsed, Duration.zero);
+    });
+
+    test('a version 1 stopwatch snapshot still restores', () {
+      final clock = FakeMonotonicClock();
+      final legacy = jsonEncode(<String, Object?>{
+        'version': 1,
+        'mode': 'stopwatch',
+        'running': false,
+        'accumulatedMicros': 5000000,
+        'savedAtMicros': 0,
+        'savedAtUtcMicros': 0,
+        'process': 'legacy',
+        'countdownMicros': 1500000000,
+        'laps': <Object?>[
+          <String, Object?>{
+            'index': 1,
+            'totalMicros': 5000000,
+            'splitMicros': 5000000,
+          },
+        ],
+        'presets': <Object?>[],
+      });
+
+      final engine = ClockEngine(
+        nowMicroseconds: clock.now,
+        initialSnapshot: legacy,
+      );
+
+      expect(engine.mode, ClockMode.stopwatch);
+      expect(engine.elapsed, const Duration(seconds: 5));
+      expect(engine.laps, hasLength(1));
+      expect(engine.countdownElapsed, Duration.zero);
+    });
+
     test('ignores malformed snapshots', () {
       final clock = FakeMonotonicClock();
       final engine = ClockEngine(
@@ -369,20 +681,6 @@ void main() {
         initialSnapshot: '{"mode":"unknown"}',
       );
       expect(empty.mode, ClockMode.stopwatch);
-    });
-
-    test('switching modes resets the active measurement', () {
-      final clock = FakeMonotonicClock();
-      final engine = ClockEngine(nowMicroseconds: clock.now);
-
-      engine.start();
-      clock.advance(const Duration(seconds: 3));
-      engine.setMode(ClockMode.countdown);
-
-      expect(engine.elapsed, Duration.zero);
-      expect(engine.laps, isEmpty);
-      expect(engine.isRunning, isFalse);
-      expect(engine.remaining, const Duration(minutes: 25));
     });
   });
 }

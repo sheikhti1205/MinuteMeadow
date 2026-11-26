@@ -12,6 +12,7 @@ Widget _host({
   required Future<void> Function(String snapshot) onSnapshot,
   String? snapshot,
   DateTime? recoveryNow,
+  FocusClock? clock,
   void Function(DateTime? deadline, String phaseLabel)? onTimelineChanged,
   ValueChanged<bool>? onImmersiveChanged,
   WidgetBuilder? companionStageBuilder,
@@ -27,12 +28,29 @@ Widget _host({
       onSnapshot: onSnapshot,
       onTimelineChanged: onTimelineChanged,
       recoveryNow: recoveryNow,
+      clock: clock,
       onImmersiveChanged: onImmersiveChanged,
       companionStageBuilder: companionStageBuilder,
       onConfigureTimers: onConfigureTimers,
     ),
   ),
 );
+
+class _PageClock implements FocusClock {
+  DateTime _wall = DateTime.utc(2026, 11, 27, 9);
+  Duration _monotonic = Duration.zero;
+
+  @override
+  DateTime nowUtc() => _wall;
+
+  @override
+  Duration monotonic() => _monotonic;
+
+  void advance(Duration duration) {
+    _wall = _wall.add(duration);
+    _monotonic += duration;
+  }
+}
 
 Widget _largeTextHost({
   required ValueNotifier<FocusSettings> settings,
@@ -54,6 +72,7 @@ Widget _largeTextHost({
       initialSnapshot: null,
       onSnapshot: onSnapshot,
       onImmersiveChanged: onImmersiveChanged,
+      companionStageBuilder: (context) => const SizedBox.expand(),
     ),
   ),
 );
@@ -95,6 +114,20 @@ Future<void> _start(WidgetTester tester) async {
   await tester.pump();
 }
 
+/// Advances the page clock and lets the 500 ms ticker deliver the outcome and
+/// any single auto-advance transition.
+Future<void> _elapse(
+  WidgetTester tester,
+  _PageClock clock,
+  Duration duration,
+) async {
+  clock.advance(duration);
+  for (var step = 0; step < 5; step++) {
+    await tester.pump(const Duration(milliseconds: 600));
+  }
+  await tester.pump();
+}
+
 void main() {
   testWidgets('home is stage first, neutral, and has no placeholder stats', (
     tester,
@@ -118,7 +151,14 @@ void main() {
     expect(find.byKey(stage), findsOneWidget);
     expect(find.byKey(FocusPage.timeKey), findsOneWidget);
     expect(find.text('25:00'), findsOneWidget);
-    expect(find.text('Focus 25m · Short 5m · Long 15m'), findsOneWidget);
+    expect(find.byKey(FocusPage.configGridKey), findsOneWidget);
+    expect(find.text('25 min'), findsOneWidget);
+    expect(find.text('5 min'), findsOneWidget);
+    expect(find.text('15 min'), findsOneWidget);
+    expect(find.text('4 sessions'), findsOneWidget);
+    expect(find.byKey(FocusPage.autoAdvanceKey), findsOneWidget);
+    expect(find.text('Auto-start next phase'), findsOneWidget);
+    expect(find.byKey(FocusPage.managePresetsKey), findsOneWidget);
     expect(find.text('Start focus'), findsOneWidget);
     expect(find.byKey(FocusPage.configureTimersKey), findsNothing);
     expect(find.text('Edit timers'), findsNothing);
@@ -194,6 +234,7 @@ void main() {
         _host(
           settings: settings,
           theme: theme,
+          companionStageBuilder: (context) => const SizedBox.expand(),
           onOutcome: (outcome, snapshot) async {},
           onSnapshot: (snapshot) async {},
         ),
@@ -248,7 +289,9 @@ void main() {
     await tester.tap(find.text('Deep work'));
     await tester.pump();
     expect(find.text('50:00'), findsOneWidget);
-    expect(find.text('Focus 50m · Short 10m · Long 20m'), findsOneWidget);
+    expect(find.text('50 min'), findsOneWidget);
+    expect(find.text('10 min'), findsOneWidget);
+    expect(find.text('20 min'), findsOneWidget);
     expect(FocusSnapshot.tryDecode(saved)?.preset, FocusPreset.deepWork);
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -917,5 +960,680 @@ void main() {
 
     expect(calls, 0);
     expect(find.text('Slide to quit focus'), findsOneWidget);
+  });
+
+  testWidgets('setup omits the stage when no companion builder is supplied', (
+    tester,
+  ) async {
+    final settings = ValueNotifier(const FocusSettings());
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(FocusPage.stageKey), findsNothing);
+    expect(find.byType(FocusStage), findsNothing);
+    expect(find.byKey(FocusPage.timeKey), findsOneWidget);
+    expect(find.byKey(FocusPage.configGridKey), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('duration editor validates and applies a one-off plan', (
+    tester,
+  ) async {
+    final settings = ValueNotifier(const FocusSettings());
+    final snapshots = <String>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async => snapshots.add(snapshot),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.focusDurationKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(FocusPage.durationEditorKey), findsOneWidget);
+
+    await tester.enterText(find.byKey(FocusPage.focusMinutesFieldKey), '0');
+    await tester.pump();
+    expect(find.text('Use 1-180'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(FocusPage.applyOneOffKey))
+          .onPressed,
+      isNull,
+    );
+
+    await tester.enterText(find.byKey(FocusPage.focusMinutesFieldKey), '32');
+    await tester.pump();
+    expect(find.text('Use 1-180'), findsNothing);
+    await tester.tap(find.byKey(FocusPage.applyOneOffKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byKey(FocusPage.durationEditorKey), findsNothing);
+    expect(find.text('32 min'), findsOneWidget);
+    expect(find.byKey(FocusPage.oneOffPlanKey), findsOneWidget);
+    final saved = FocusSnapshot.tryDecode(snapshots.last);
+    expect(saved?.plan?.isOneOff, isTrue);
+    expect(saved?.plan?.oneOffSettings?.focusMinutes, 32);
+
+    await tester.tap(find.text('Start focus'));
+    await tester.pump();
+    expect(find.text('32:00'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('saves an edited plan as a default named preset', (tester) async {
+    final settings = ValueNotifier(const FocusSettings());
+    final snapshots = <String>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async => snapshots.add(snapshot),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.focusDurationKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.enterText(find.byKey(FocusPage.focusMinutesFieldKey), '45');
+    await tester.pump();
+    await tester.tap(find.byKey(FocusPage.savePresetActionKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byKey(FocusPage.presetNameFieldKey), findsOneWidget);
+    await tester.enterText(find.byKey(FocusPage.presetNameFieldKey), 'Writing');
+    await tester.pump();
+    await tester.tap(find.text('Make this the default'));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Save preset'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.widgetWithText(ChoiceChip, 'Writing'), findsOneWidget);
+    expect(
+      tester
+          .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Writing'))
+          .selected,
+      isTrue,
+    );
+    expect(find.text('45 min'), findsOneWidget);
+    final saved = FocusSnapshot.tryDecode(snapshots.last)?.plan;
+    expect(saved?.defaultPreset.name, 'Writing');
+    expect(saved?.selectedPreset.name, 'Writing');
+    expect(saved?.isOneOff, isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('manages presets, duplicate/delete and protects the default', (
+    tester,
+  ) async {
+    final settings = ValueNotifier(const FocusSettings());
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.managePresetsKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(FocusPage.presetManagerKey), findsOneWidget);
+    expect(find.text('Default: Default'), findsOneWidget);
+
+    await tester.tap(find.byKey(FocusPage.newPresetKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.enterText(find.byKey(FocusPage.presetNameFieldKey), 'Writing');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Create preset'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.tap(find.byKey(FocusPage.managePresetsKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(
+      find.descendant(
+        of: find.byKey(FocusPage.presetManagerKey),
+        matching: find.text('Writing'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('focus-preset-menu-custom-3')),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Set as default'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Default: Writing'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey('focus-preset-menu-custom-3')),
+    );
+    await tester.pump();
+    expect(find.text('Delete'), findsNothing);
+    await tester.tap(find.text('Duplicate'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.descendant(
+        of: find.byKey(FocusPage.presetManagerKey),
+        matching: find.text('Writing copy'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('focus-preset-menu-custom-4')),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Delete'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Delete Writing copy?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Writing copy'), findsNothing);
+    expect(
+      find.descendant(
+        of: find.byKey(FocusPage.presetManagerKey),
+        matching: find.text('Writing'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('edits and renames a built-in preset from the manager', (
+    tester,
+  ) async {
+    final settings = ValueNotifier(const FocusSettings());
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Sprint'));
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.managePresetsKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(
+      find.byKey(const ValueKey('focus-preset-menu-sprint')),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Edit values'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byKey(FocusPage.updatePresetKey), findsOneWidget);
+    await tester.enterText(find.byKey(FocusPage.focusMinutesFieldKey), '20');
+    await tester.pump();
+    await tester.tap(find.byKey(FocusPage.updatePresetKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('20 min'), findsOneWidget);
+    expect(
+      tester
+          .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Sprint'))
+          .selected,
+      isTrue,
+    );
+
+    await tester.tap(find.byKey(FocusPage.managePresetsKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(
+      find.byKey(const ValueKey('focus-preset-menu-sprint')),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Rename'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.enterText(find.byKey(FocusPage.presetNameFieldKey), 'Quick');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Rename'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.widgetWithText(ChoiceChip, 'Quick'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('auto-advance starts a break only after the outcome is stored', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    final snapshots = <String>[];
+    final outcomes = <(FocusOutcome, String)>[];
+    final events = <bool>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async => snapshots.add(snapshot),
+        onImmersiveChanged: events.add,
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.autoAdvanceKey));
+    await tester.pump();
+    expect(
+      FocusSnapshot.tryDecode(snapshots.last)?.plan?.autoAdvance,
+      isTrue,
+    );
+
+    await tester.tap(find.text('Start focus'));
+    await tester.pump();
+    expect(events, [false, true]);
+    expect(find.byKey(FocusPage.slideToQuitKey), findsOneWidget);
+
+    clock.advance(const Duration(minutes: 25));
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(outcomes, hasLength(1));
+    expect(outcomes.single.$1.completed, isTrue);
+    expect(find.text('Short break'), findsOneWidget);
+    expect(find.byKey(FocusPage.slideToQuitKey), findsNothing);
+    expect(events, [false, true, false]);
+
+    await tester.pump(const Duration(seconds: 2));
+    expect(outcomes, hasLength(1));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('completion offers a break and a completed break ends the plan', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    final outcomes = <(FocusOutcome, String)>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        snapshot: _completedSnapshot(),
+        clock: clock,
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Focus complete'), findsOneWidget);
+    expect(find.text('Start short break'), findsOneWidget);
+    expect(find.text('Skip break'), findsOneWidget);
+
+    await tester.tap(find.text('Start short break'));
+    await tester.pump();
+    expect(find.text('Short break'), findsOneWidget);
+
+    clock.advance(const Duration(minutes: 5));
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+
+    expect(outcomes, hasLength(1));
+    expect(find.text('Break complete'), findsOneWidget);
+    expect(find.text('Start next focus'), findsOneWidget);
+    expect(find.text('End plan'), findsOneWidget);
+
+    await tester.tap(find.text('End plan'));
+    await tester.pump();
+    expect(find.text('Ready to focus'), findsOneWidget);
+    expect(find.byKey(FocusPage.configGridKey), findsOneWidget);
+    expect(outcomes, hasLength(1));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('completed focus stays on the result by default', (tester) async {
+    final settings = ValueNotifier(const FocusSettings());
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        snapshot: _completedSnapshot(),
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(find.text('Focus complete'), findsOneWidget);
+    expect(find.text('Skip break'), findsOneWidget);
+    expect(find.text('Short break'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a two-block plan offers the next block then Done', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(
+      const FocusSettings(sessionsPerCycle: 2),
+    );
+    final outcomes = <(FocusOutcome, String)>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Start focus'));
+    await tester.pump();
+    await _elapse(tester, clock, const Duration(minutes: 25));
+
+    expect(find.text('Focus complete'), findsOneWidget);
+    expect(find.text('1 of 2 focus sessions'), findsOneWidget);
+    expect(find.text('Start short break'), findsOneWidget);
+    expect(find.text('Skip break'), findsOneWidget);
+
+    await tester.tap(find.text('Skip break'));
+    await tester.pump();
+    expect(find.text('Break skipped'), findsOneWidget);
+    expect(find.text('Start next focus'), findsOneWidget);
+    expect(find.text('End plan'), findsOneWidget);
+    expect(outcomes, hasLength(1));
+
+    await tester.tap(find.text('Start next focus'));
+    await tester.pump();
+    expect(find.byKey(FocusPage.slideToQuitKey), findsOneWidget);
+
+    await _elapse(tester, clock, const Duration(minutes: 25));
+    expect(find.text('Focus complete'), findsOneWidget);
+    expect(find.text('2 of 2 focus sessions'), findsOneWidget);
+    expect(find.text('Start long break'), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+    expect(find.text('Start next focus'), findsNothing);
+
+    await tester.tap(find.text('Start long break'));
+    await tester.pump();
+    await _elapse(tester, clock, const Duration(minutes: 15));
+
+    expect(find.text('Break complete'), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+    expect(find.text('Start next focus'), findsNothing);
+    expect(outcomes, hasLength(3));
+
+    await tester.tap(find.text('Done'));
+    await tester.pump();
+    expect(find.text('Ready to focus'), findsOneWidget);
+    expect(find.byKey(FocusPage.configGridKey), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('auto-advance stops after a two-block plan', (tester) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(
+      const FocusSettings(sessionsPerCycle: 2),
+    );
+    final outcomes = <(FocusOutcome, String)>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.autoAdvanceKey));
+    await tester.pump();
+    await tester.tap(find.text('Start focus'));
+    await tester.pump();
+
+    await _elapse(tester, clock, const Duration(minutes: 25));
+    expect(find.text('Short break'), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+
+    await _elapse(tester, clock, const Duration(minutes: 5));
+    expect(find.byKey(FocusPage.slideToQuitKey), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+
+    await _elapse(tester, clock, const Duration(minutes: 25));
+    expect(find.text('Long break'), findsOneWidget);
+
+    await _elapse(tester, clock, const Duration(minutes: 15));
+    expect(find.text('Break complete'), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+    expect(find.text('Start next focus'), findsNothing);
+
+    final finished = FocusSnapshot.tryDecode(outcomes.last.$2);
+    expect(finished?.status, FocusStatus.completed);
+    expect(finished?.phase, FocusPhase.longBreak);
+    expect(finished?.planTarget, 2);
+    expect(finished?.planCompleted, 2);
+
+    final count = outcomes.length;
+    await _elapse(tester, clock, const Duration(minutes: 30));
+    expect(find.text('Done'), findsOneWidget);
+    expect(find.text('Start next focus'), findsNothing);
+    expect(outcomes, hasLength(count));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a one-off covers one whole plan and clears at its end', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    final outcomes = <(FocusOutcome, String)>[];
+    final snapshots = <String>[];
+    final defaultsBefore = settings.value;
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async => snapshots.add(snapshot),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(FocusPage.focusDurationKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.enterText(find.byKey(FocusPage.focusMinutesFieldKey), '30');
+    await tester.enterText(find.byKey(FocusPage.sessionsFieldKey), '2');
+    await tester.pump();
+    await tester.tap(find.byKey(FocusPage.applyOneOffKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byKey(FocusPage.oneOffPlanKey), findsOneWidget);
+    expect(find.text('Applies to the next plan only'), findsOneWidget);
+    expect(find.text('30 min'), findsOneWidget);
+    expect(find.text('2 sessions'), findsOneWidget);
+    expect(settings.value, defaultsBefore);
+
+    await tester.tap(find.text('Start focus'));
+    await tester.pump();
+
+    final running = FocusSnapshot.tryDecode(snapshots.last);
+    expect(running?.planTarget, 2);
+    expect(running?.planCompleted, 0);
+    expect(running?.planSettings?.focusMinutes, 30);
+    expect(running?.plan?.isOneOff, isTrue);
+
+    await _elapse(tester, clock, const Duration(minutes: 30));
+    expect(find.text('Start short break'), findsOneWidget);
+    expect(find.text('1 of 2 focus sessions'), findsOneWidget);
+    expect(outcomes, hasLength(1));
+
+    final stored = FocusSnapshot.tryDecode(outcomes.last.$2);
+    expect(stored?.planTarget, 2);
+    expect(stored?.planSettings?.focusMinutes, 30);
+    expect(stored?.plan?.isOneOff, isTrue);
+    expect(stored?.plan?.defaultId, FocusPreset.defaultsId);
+
+    await tester.tap(find.text('Skip break'));
+    await tester.pump();
+    await tester.tap(find.text('End plan'));
+    await tester.pump();
+
+    expect(find.byKey(FocusPage.oneOffPlanKey), findsNothing);
+    expect(find.text('25 min'), findsOneWidget);
+    expect(settings.value, defaultsBefore);
+
+    final ended = FocusSnapshot.tryDecode(snapshots.last);
+    expect(ended?.planTarget, 0);
+    expect(ended?.plan?.isOneOff, isFalse);
+    expect(ended?.plan?.defaultId, FocusPreset.defaultsId);
+    expect(ended?.plan?.presets.length, FocusPreset.builtIns.length);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('an active plan and its one-off survive recovery', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    final outcomes = <(FocusOutcome, String)>[];
+    final snapshots = <String>[];
+    final defaultsBefore = settings.value;
+    addTearDown(settings.dispose);
+
+    Future<void> pumpHost({String? snapshot}) async {
+      await tester.pumpWidget(
+        _host(
+          settings: settings,
+          clock: clock,
+          snapshot: snapshot,
+          onOutcome: (outcome, value) async =>
+              outcomes.add((outcome, value)),
+          onSnapshot: (value) async => snapshots.add(value),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await pumpHost();
+    await tester.tap(find.byKey(FocusPage.focusDurationKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.enterText(find.byKey(FocusPage.focusMinutesFieldKey), '30');
+    await tester.enterText(find.byKey(FocusPage.sessionsFieldKey), '2');
+    await tester.pump();
+    await tester.tap(find.byKey(FocusPage.applyOneOffKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.tap(find.text('Start focus'));
+    await tester.pump();
+    await _elapse(tester, clock, const Duration(minutes: 5));
+    await tester.tap(find.byKey(FocusPage.primaryActionKey));
+    await tester.pump();
+
+    final paused = snapshots.last;
+    final pausedSnapshot = FocusSnapshot.tryDecode(paused);
+    expect(pausedSnapshot?.status, FocusStatus.paused);
+    expect(pausedSnapshot?.planTarget, 2);
+    expect(pausedSnapshot?.planSettings?.focusMinutes, 30);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpHost(snapshot: paused);
+
+    expect(find.text('Resume'), findsOneWidget);
+    expect(find.text('25:00'), findsOneWidget);
+
+    await tester.tap(find.byKey(FocusPage.primaryActionKey));
+    await tester.pump();
+    await _elapse(tester, clock, const Duration(minutes: 25));
+    expect(find.text('Start short break'), findsOneWidget);
+    expect(find.text('1 of 2 focus sessions'), findsOneWidget);
+
+    await tester.tap(find.text('Skip break'));
+    await tester.pump();
+    await tester.tap(find.text('Start next focus'));
+    await tester.pump();
+    expect(find.text('30:00'), findsOneWidget);
+
+    await tester.tap(find.byKey(FocusPage.closeActionKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Cancel session'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+
+    final abandoned = FocusSnapshot.tryDecode(outcomes.last.$2);
+    expect(abandoned?.planTarget, 0);
+    expect(abandoned?.plan?.isOneOff, isFalse);
+    expect(abandoned?.plan?.defaultId, FocusPreset.defaultsId);
+    expect(settings.value, defaultsBefore);
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }

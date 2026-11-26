@@ -42,6 +42,24 @@ Future<void> _dispose(WidgetTester tester) async {
   await tester.pump();
 }
 
+Future<void> _showMode(WidgetTester tester, String label) async {
+  // The segmented control comes before the card in the tree, so the first
+  // match is always the mode selector.
+  await tester.tap(find.text(label).first);
+  await tester.pump();
+}
+
+Future<void> _enterDuration(
+  WidgetTester tester, {
+  required String hours,
+  required String minutes,
+  required String seconds,
+}) async {
+  await tester.enterText(find.byKey(ClockPage.hoursFieldKey), hours);
+  await tester.enterText(find.byKey(ClockPage.minutesFieldKey), minutes);
+  await tester.enterText(find.byKey(ClockPage.secondsFieldKey), seconds);
+}
+
 void main() {
   testWidgets('shows one dominant stopwatch display and a start action', (
     tester,
@@ -53,10 +71,11 @@ void main() {
 
     expect(find.text('00:00.0'), findsOneWidget);
     expect(find.text('Start'), findsOneWidget);
-    expect(find.text('Stopwatch'), findsOneWidget);
+    expect(find.text('Stopwatch'), findsNWidgets(2));
     expect(find.text('Countdown'), findsOneWidget);
     expect(find.byTooltip('Reset'), findsOneWidget);
     expect(find.byTooltip('Lap'), findsOneWidget);
+    expect(find.byTooltip('Repeat'), findsNothing);
   });
 
   testWidgets('start, tick, pause, lap and reset use the injected clock', (
@@ -73,7 +92,6 @@ void main() {
     expect(engine.isRunning, isTrue);
     expect(find.text('Pause'), findsOneWidget);
     expect(snapshots, isNotEmpty);
-    expect(snapshots.last, contains('"running":true'));
 
     clock.advance(const Duration(seconds: 2));
     await tester.pump(const Duration(milliseconds: 100));
@@ -106,6 +124,31 @@ void main() {
     await _dispose(tester);
   });
 
+  testWidgets('the stopwatch readout yields to the lap rows', (tester) async {
+    final clock = FakeMonotonicClock();
+    final engine = ClockEngine(nowMicroseconds: clock.now);
+
+    Text readout() => tester.widget<Text>(find.byKey(ClockPage.timeKey));
+
+    await tester.pumpWidget(_harness(engine));
+    await tester.tap(find.text('Start'));
+    await tester.pump();
+    clock.advance(const Duration(seconds: 2));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(readout().style?.fontSize, 64);
+
+    await tester.tap(find.byTooltip('Lap'));
+    await tester.pump();
+    expect(readout().style?.fontSize, 44);
+
+    await tester.tap(find.byTooltip('Reset'));
+    await tester.pump();
+    expect(readout().style?.fontSize, 64);
+
+    await _dispose(tester);
+  });
+
   testWidgets('restores a countdown snapshot and shows remaining time', (
     tester,
   ) async {
@@ -130,35 +173,117 @@ void main() {
     expect(find.text('09:00'), findsOneWidget);
     expect(find.text('of 10:00'), findsOneWidget);
     expect(find.text('Resume'), findsOneWidget);
-    expect(find.text('Countdown'), findsOneWidget);
+    expect(find.text('Countdown'), findsNWidgets(2));
   });
 
-  testWidgets('adds and deletes a custom countdown preset', (tester) async {
+  testWidgets('sets an exact one-off hours, minutes and seconds duration', (
+    tester,
+  ) async {
     final clock = FakeMonotonicClock();
     final engine = ClockEngine(nowMicroseconds: clock.now);
 
     await tester.pumpWidget(_harness(engine));
+    await _showMode(tester, 'Countdown');
 
-    await tester.tap(find.text('Countdown'));
-    await tester.pump();
-    expect(find.text('25:00'), findsOneWidget);
-    expect(find.text('No presets yet.'), findsOneWidget);
-
-    await tester.tap(find.text('Add preset'));
+    await tester.tap(find.byKey(ClockPage.setDurationKey));
+    await tester.pumpAndSettle();
+    await _enterDuration(tester, hours: '1', minutes: '2', seconds: '3');
+    await tester.tap(find.byKey(ClockPage.durationSubmitKey));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextFormField).at(1), '5');
-    await tester.tap(find.widgetWithText(FilledButton, 'Add'));
+    expect(engine.countdownDuration, const Duration(hours: 1, minutes: 2, seconds: 3));
+    expect(find.text('1:02:03'), findsOneWidget);
+    expect(find.text('of 1:02:03'), findsOneWidget);
+    expect(engine.presets, isEmpty);
+
+    await _dispose(tester);
+  });
+
+  testWidgets('rejects invalid one-off durations without closing the editor', (
+    tester,
+  ) async {
+    final clock = FakeMonotonicClock();
+    final engine = ClockEngine(nowMicroseconds: clock.now);
+
+    await tester.pumpWidget(_harness(engine));
+    await _showMode(tester, 'Countdown');
+
+    await tester.tap(find.byKey(ClockPage.setDurationKey));
+    await tester.pumpAndSettle();
+
+    await _enterDuration(tester, hours: '0', minutes: '0', seconds: '0');
+    await tester.tap(find.byKey(ClockPage.durationSubmitKey));
+    await tester.pump();
+    expect(find.text('Choose at least 1 second.'), findsOneWidget);
+    expect(find.text('Set countdown'), findsOneWidget);
+
+    await _enterDuration(tester, hours: '24', minutes: '30', seconds: '0');
+    await tester.tap(find.byKey(ClockPage.durationSubmitKey));
+    await tester.pump();
+    expect(find.text('Keep the duration at 24 hours or less.'), findsOneWidget);
+
+    await _enterDuration(tester, hours: '2', minutes: '5', seconds: '0');
+    await tester.tap(find.byKey(ClockPage.durationSubmitKey));
+    await tester.pumpAndSettle();
+
+    expect(engine.countdownDuration, const Duration(hours: 2, minutes: 5));
+    expect(find.text('2:05:00'), findsOneWidget);
+
+    await _dispose(tester);
+  });
+
+  testWidgets('creates, edits and confirms deletion of presets', (tester) async {
+    final clock = FakeMonotonicClock();
+    final engine = ClockEngine(nowMicroseconds: clock.now);
+
+    await tester.pumpWidget(_harness(engine));
+    await _showMode(tester, 'Countdown');
+    expect(find.text('25:00'), findsOneWidget);
+
+    await tester.tap(find.byKey(ClockPage.addPresetKey));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(ClockPage.presetLabelKey), 'Study');
+    await _enterDuration(tester, hours: '0', minutes: '5', seconds: '0');
+    await tester.tap(find.byKey(ClockPage.presetSubmitKey));
     await tester.pumpAndSettle();
 
     expect(engine.presets, hasLength(1));
-    expect(find.text('5 min'), findsOneWidget);
-    expect(find.text('No presets yet.'), findsNothing);
+    expect(find.text('Study'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Delete 5 min'));
-    await tester.pump();
+    await tester.tap(find.byTooltip('Preset options for Study'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(ClockPage.presetLabelKey), 'Deep work');
+    await _enterDuration(tester, hours: '0', minutes: '10', seconds: '0');
+    await tester.tap(find.byKey(ClockPage.presetSubmitKey));
+    await tester.pumpAndSettle();
+
+    expect(engine.presets.single.label, 'Deep work');
+    expect(
+      engine.presets.single.durationMicros,
+      const Duration(minutes: 10).inMicroseconds,
+    );
+    expect(find.text('Deep work'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Preset options for Deep work'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete Deep work?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(engine.presets, hasLength(1));
+
+    await tester.tap(find.byTooltip('Preset options for Deep work'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+
     expect(engine.presets, isEmpty);
-    expect(find.text('5 min'), findsNothing);
+    expect(find.text('Deep work'), findsNothing);
 
     await _dispose(tester);
   });
@@ -172,75 +297,102 @@ void main() {
     );
 
     await tester.pumpWidget(_harness(engine));
-
-    await tester.tap(find.text('Countdown'));
-    await tester.pumpAndSettle();
+    await _showMode(tester, 'Countdown');
     await tester.tap(find.text('Short break'));
     await tester.pumpAndSettle();
 
     expect(engine.selectedPresetId, preset.id);
     expect(engine.countdownDuration, const Duration(minutes: 5));
-    expect(find.text('05:00'), findsOneWidget);
     expect(find.text('of 05:00'), findsOneWidget);
 
     await _dispose(tester);
   });
 
-  testWidgets('confirms before switching away from a running stopwatch', (
+  testWidgets('switching modes preserves a running stopwatch', (tester) async {
+    final clock = FakeMonotonicClock();
+    final engine = ClockEngine(nowMicroseconds: clock.now);
+
+    await tester.pumpWidget(_harness(engine));
+    await tester.tap(find.text('Start'));
+    await tester.pump();
+    clock.advance(const Duration(seconds: 3));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await _showMode(tester, 'Countdown');
+    expect(find.text('Switch to countdown?'), findsNothing);
+    expect(find.byKey(ClockPage.hiddenStopwatchKey), findsOneWidget);
+    expect(engine.mode, ClockMode.countdown);
+    expect(engine.isStopwatchRunning, isTrue);
+    expect(engine.stopwatchElapsed, const Duration(seconds: 3));
+
+    await _showMode(tester, 'Stopwatch');
+    expect(find.text('00:03.0'), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+
+    await tester.tap(find.text('Pause'));
+    await tester.pump();
+    await _dispose(tester);
+  });
+
+  testWidgets('switching modes preserves a paused stopwatch and its laps', (
     tester,
   ) async {
     final clock = FakeMonotonicClock();
     final engine = ClockEngine(nowMicroseconds: clock.now);
 
     await tester.pumpWidget(_harness(engine));
-
     await tester.tap(find.text('Start'));
     await tester.pump();
     clock.advance(const Duration(seconds: 3));
     await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byTooltip('Lap'));
+    await tester.pump();
+    await tester.tap(find.text('Pause'));
+    await tester.pump();
 
-    await tester.tap(find.text('Countdown'));
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('Switch to countdown?'), findsOneWidget);
-    expect(find.text('Switch'), findsOneWidget);
+    await _showMode(tester, 'Countdown');
+    await _showMode(tester, 'Stopwatch');
 
-    await tester.tap(find.text('Switch'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('25:00'), findsOneWidget);
-    expect(find.text('Ready'), findsOneWidget);
-    expect(find.text('Start'), findsOneWidget);
-    expect(engine.isRunning, isFalse);
-    expect(engine.mode, ClockMode.countdown);
+    expect(find.text('00:03.0'), findsOneWidget);
+    expect(find.text('Resume'), findsOneWidget);
+    expect(find.text('Lap 1'), findsOneWidget);
 
     await _dispose(tester);
   });
 
-  testWidgets('cancelling a mode switch preserves the stopwatch', (
+  testWidgets('confirms before replacing a countdown with a preset', (
     tester,
   ) async {
     final clock = FakeMonotonicClock();
     final engine = ClockEngine(nowMicroseconds: clock.now);
-    final before = <String>[];
+    engine.setCountdownDuration(const Duration(minutes: 10));
+    engine.start();
+    clock.advance(const Duration(minutes: 1));
+    engine.pause();
+    engine.addPreset(label: 'Short', duration: const Duration(minutes: 5));
 
-    await tester.pumpWidget(_harness(engine, snapshots: before));
+    await tester.pumpWidget(_harness(engine));
+    expect(find.text('09:00'), findsOneWidget);
 
-    await tester.tap(find.text('Start'));
-    await tester.pump();
-    clock.advance(const Duration(seconds: 3));
-    await tester.pump(const Duration(milliseconds: 100));
-
-    await tester.tap(find.text('Countdown'));
-    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('Short'));
+    await tester.pumpAndSettle();
+    expect(find.text('Use Short?'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
 
-    expect(engine.mode, ClockMode.stopwatch);
-    expect(engine.elapsed, const Duration(seconds: 3));
-    expect(find.text('00:03.0'), findsOneWidget);
+    expect(engine.countdownDuration, const Duration(minutes: 10));
+    expect(engine.countdownElapsed, const Duration(minutes: 1));
+    expect(find.text('09:00'), findsOneWidget);
 
-    await tester.tap(find.text('Pause'));
-    await tester.pump();
+    await tester.tap(find.text('Short'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Use preset'));
+    await tester.pumpAndSettle();
+
+    expect(engine.countdownDuration, const Duration(minutes: 5));
+    expect(engine.countdownElapsed, Duration.zero);
+    expect(find.text('of 05:00'), findsOneWidget);
+
     await _dispose(tester);
   });
 
@@ -256,8 +408,7 @@ void main() {
       _harness(engine, deadlines: deadlines, wallClock: () => wall),
     );
 
-    await tester.tap(find.text('Countdown'));
-    await tester.pump();
+    await _showMode(tester, 'Countdown');
     await tester.tap(find.text('Start'));
     await tester.pump();
 
@@ -314,6 +465,79 @@ void main() {
     await _dispose(tester);
   });
 
+  testWidgets('Repeat restarts the original duration from the expiry state', (
+    tester,
+  ) async {
+    final clock = FakeMonotonicClock();
+    final engine = ClockEngine(nowMicroseconds: clock.now);
+    engine.setCountdownDuration(const Duration(seconds: 5));
+    final wall = DateTime.utc(2026, 1, 1, 12);
+    final deadlines = <DateTime?>[];
+
+    await tester.pumpWidget(
+      _harness(engine, deadlines: deadlines, wallClock: () => wall),
+    );
+
+    await tester.tap(find.text('Start'));
+    await tester.pump();
+    clock.advance(const Duration(seconds: 6));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('Complete'), findsOneWidget);
+
+    await tester.tap(find.byKey(ClockPage.repeatActionKey));
+    await tester.pump();
+
+    expect(engine.isCountdownRunning, isTrue);
+    expect(engine.countdownDuration, const Duration(seconds: 5));
+    expect(engine.remaining, const Duration(seconds: 5));
+    expect(find.text('Complete'), findsNothing);
+    expect(find.text('00:05'), findsOneWidget);
+    expect(deadlines.last, wall.add(const Duration(seconds: 5)));
+
+    await _dispose(tester);
+  });
+
+  testWidgets('a countdown keeps running while the stopwatch is shown', (
+    tester,
+  ) async {
+    final clock = FakeMonotonicClock();
+    final engine = ClockEngine(nowMicroseconds: clock.now);
+    engine.setCountdownDuration(const Duration(seconds: 3));
+    final wall = DateTime.utc(2026, 1, 1, 12);
+    final deadlines = <DateTime?>[];
+    var completions = 0;
+
+    await tester.pumpWidget(
+      _harness(
+        engine,
+        deadlines: deadlines,
+        wallClock: () => wall,
+        onCountdownCompleted: () => completions++,
+      ),
+    );
+    await tester.tap(find.text('Start'));
+    await tester.pump();
+
+    await _showMode(tester, 'Stopwatch');
+    expect(find.byKey(ClockPage.hiddenCountdownKey), findsOneWidget);
+    expect(engine.isCountdownRunning, isTrue);
+    expect(deadlines.last, wall.add(const Duration(seconds: 3)));
+
+    clock.advance(const Duration(seconds: 4));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(completions, 1);
+    expect(engine.isCountdownComplete, isTrue);
+    expect(deadlines.contains(null), isFalse);
+
+    await _showMode(tester, 'Countdown');
+    expect(find.text('Complete'), findsOneWidget);
+    await tester.tap(find.byKey(ClockPage.repeatActionKey));
+    await tester.pump();
+    expect(engine.isCountdownRunning, isTrue);
+
+    await _dispose(tester);
+  });
+
   testWidgets('recoveryNow bridges a restored running countdown', (
     tester,
   ) async {
@@ -356,42 +580,6 @@ void main() {
       deadlines.single!.isAfter(wall.add(const Duration(minutes: 7))),
       isTrue,
     );
-
-    await _dispose(tester);
-  });
-
-  testWidgets('confirms before replacing a countdown with a preset', (
-    tester,
-  ) async {
-    final clock = FakeMonotonicClock();
-    final engine = ClockEngine(nowMicroseconds: clock.now);
-    engine.setCountdownDuration(const Duration(minutes: 10));
-    engine.start();
-    clock.advance(const Duration(minutes: 1));
-    engine.pause();
-    engine.addPreset(label: 'Short', duration: const Duration(minutes: 5));
-
-    await tester.pumpWidget(_harness(engine));
-    expect(find.text('09:00'), findsOneWidget);
-
-    await tester.tap(find.text('Short'));
-    await tester.pumpAndSettle();
-    expect(find.text('Use Short?'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-
-    expect(engine.countdownDuration, const Duration(minutes: 10));
-    expect(engine.elapsed, const Duration(minutes: 1));
-    expect(find.text('09:00'), findsOneWidget);
-
-    await tester.tap(find.text('Short'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Use preset'));
-    await tester.pumpAndSettle();
-
-    expect(engine.countdownDuration, const Duration(minutes: 5));
-    expect(engine.elapsed, Duration.zero);
-    expect(find.text('05:00'), findsOneWidget);
 
     await _dispose(tester);
   });

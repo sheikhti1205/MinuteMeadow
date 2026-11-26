@@ -71,9 +71,21 @@ class SessionTotals {
   final Duration focused;
   final Duration intended;
 
+  factory SessionTotals.of(Iterable<SessionRecord> sessions) {
+    final builder = _TotalsBuilder();
+    for (final session in sessions) {
+      builder.add(session);
+    }
+    return builder.build();
+  }
+
   Duration get averageFocused => sessions == 0
       ? Duration.zero
       : Duration(milliseconds: focused.inMilliseconds ~/ sessions);
+
+  /// Whole-number completion rate, or zero when nothing was recorded.
+  int get completionPercent =>
+      sessions == 0 ? 0 : (completed * 100 / sessions).round();
 }
 
 /// Activity recorded on one local calendar day.
@@ -129,6 +141,80 @@ class InsightsSummary {
   Duration get averageFocused => allTimeTotals.averageFocused;
 }
 
+/// Calendar windows the overview can show.
+enum InsightsPeriod { today, week, month, all }
+
+/// Completion outcome filter for history management.
+enum SessionOutcomeFilter { all, completed, notCompleted }
+
+/// The first local date included in [period], or null for all time.
+CalendarDay? periodStart(InsightsPeriod period, CalendarDay today) =>
+    switch (period) {
+      InsightsPeriod.today => today,
+      InsightsPeriod.week => today.addDays(1 - today.weekday),
+      InsightsPeriod.month => CalendarDay(today.year, today.month, 1),
+      InsightsPeriod.all => null,
+    };
+
+/// Returns sessions recorded in [period], newest finish first.
+List<SessionRecord> sessionsInPeriod(
+  Iterable<SessionRecord> sessions, {
+  required InsightsPeriod period,
+  required CalendarDay today,
+  CalendarDay Function(DateTime instant)? localDay,
+}) {
+  final start = periodStart(period, today);
+  return newestFirst(
+    filterSessions(
+      sessions,
+      from: start,
+      to: period == InsightsPeriod.all ? null : today,
+      localDay: localDay,
+    ),
+  );
+}
+
+/// Filters recorded sessions by local finish date and completion outcome.
+///
+/// Both [from] and [to] are inclusive local calendar dates.
+List<SessionRecord> filterSessions(
+  Iterable<SessionRecord> sessions, {
+  CalendarDay? from,
+  CalendarDay? to,
+  SessionOutcomeFilter outcome = SessionOutcomeFilter.all,
+  CalendarDay Function(DateTime instant)? localDay,
+}) {
+  final projectDay = localDay ?? CalendarDay.fromLocal;
+  return [
+    for (final session in sessions)
+      if (_matchesOutcome(session, outcome) &&
+          _withinIfBounded(projectDay(session.finishedAt), from, to))
+        session,
+  ];
+}
+
+/// Sorts sessions newest finish first, breaking ties by descending id.
+List<SessionRecord> newestFirst(Iterable<SessionRecord> sessions) =>
+    List<SessionRecord>.of(sessions)
+      ..sort((a, b) {
+        final byFinish = b.finishedAt.compareTo(a.finishedAt);
+        if (byFinish != 0) return byFinish;
+        return b.id.compareTo(a.id);
+      });
+
+bool _matchesOutcome(SessionRecord session, SessionOutcomeFilter outcome) =>
+    switch (outcome) {
+      SessionOutcomeFilter.all => true,
+      SessionOutcomeFilter.completed => session.completed,
+      SessionOutcomeFilter.notCompleted => !session.completed,
+    };
+
+bool _withinIfBounded(CalendarDay day, CalendarDay? from, CalendarDay? to) {
+  if (from != null && day.compareTo(from) < 0) return false;
+  if (to != null && day.compareTo(to) > 0) return false;
+  return true;
+}
+
 /// Builds the Insights summary from recorded sessions.
 ///
 /// Sessions belong to the local calendar day on which they finished. Weeks
@@ -179,12 +265,7 @@ InsightsSummary summarizeSessions(
     lastSevenDays.add(builder?.build(day) ?? DayActivity.empty(day));
   }
 
-  final history = List<SessionRecord>.of(sessions)
-    ..sort((a, b) {
-      final byFinish = b.finishedAt.compareTo(a.finishedAt);
-      if (byFinish != 0) return byFinish;
-      return b.id.compareTo(a.id);
-    });
+  final history = newestFirst(sessions);
 
   return InsightsSummary(
     today: today,
