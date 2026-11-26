@@ -1,6 +1,6 @@
 # Companion Focus
 
-Companion Focus is an Android app in early development. Its first release will combine a focus timer, stopwatch, session history, and installable pixel-art companion packs.
+Companion Focus is an Android app in early development. The current build opens a themed startup screen. The first release will combine a focus timer, stopwatch, session history, and installable pixel-art companion packs.
 
 ## Build
 
