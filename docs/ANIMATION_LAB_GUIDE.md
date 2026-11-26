@@ -1,7 +1,7 @@
 # Animation laboratory
 
-The laboratory is planned for development builds. It previews geometric rigs and imported assets separately from the production catalogue.
+Open **Settings → Animation laboratory** in a debug build or a web build with [development tools enabled](TESTING_STRATEGY.md). The lab starts with a geometric rig and imports standalone rigs separately from the companion library.
 
-Start with a geometric rig and inspect it at integer zoom. Pause playback and step through frames or scrub the timeline. Toggle a layer to isolate overlap, then show pivots and hitboxes to confirm the draw order and touch region. Change the background to check transparency and outlines.
+Choose a clip, set playback speed, or pause to scrub and step by 50 ms. Use integer zoom to inspect pixels. Turn on layers, pivots, or hitboxes to check overlap, transforms, and touch regions. **Run route** exercises walk, run, and jump; **Throw** exercises ball play.
 
-Validate a rig before inspecting it. A useful error identifies the asset, layer, clip or keyframe that needs correction. Production builds do not include laboratory routes or built-in demonstration packs.
+Use **Load rig** for the JSON manifest and **Load atlas** for its PNG or WebP sprites. Atlas dimensions must match the manifest. **Manifest** shows validation issues and the source JSON. Production builds omit the laboratory and geometric catalogue.

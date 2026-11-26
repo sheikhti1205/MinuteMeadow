@@ -117,7 +117,7 @@ void main() {
     expect(find.textContaining('Unsupported'), findsOneWidget);
   });
 
-  testWidgets('removes a companion from its detail route', (tester) async {
+  testWidgets('returns to the library after removing a companion', (tester) async {
     final writes = <String>[];
     await tester.pumpWidget(
       host(
@@ -136,7 +136,8 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Remove'));
     await tester.pumpAndSettle();
 
-    expect(find.text('This companion is not installed.'), findsOneWidget);
+    expect(find.text('No companions installed'), findsOneWidget);
+    expect(find.text('This companion is not installed.'), findsNothing);
     expect(writes, hasLength(1));
     expect(CompanionLibrary.decode(writes.single).library.isEmpty, isTrue);
   });

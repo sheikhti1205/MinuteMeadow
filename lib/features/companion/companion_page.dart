@@ -332,9 +332,13 @@ class _InstalledPackPage extends StatelessWidget {
     if (confirmed != true || !context.mounted) return;
     final ok = await session.remove(id);
     if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (ok && ModalRoute.of(context)?.isCurrent == true) {
+      Navigator.of(context).pop();
+    }
     final text = ok ? session.success : session.error;
     if (text != null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+      messenger.showSnackBar(SnackBar(content: Text(text)));
     }
   }
 

@@ -57,6 +57,38 @@ void main() {
     });
     expect(() => DataBackup.decode(source), throwsFormatException);
   });
+
+  test('restore replaces timers and history while only clear removes packs', () async {
+    final database = LocalDatabase(NativeDatabase.memory());
+    addTearDown(database.close);
+    const settings = AppSettings(focusMinutes: 37);
+    const library = '{"schema":"companion.library/1","packs":{}}';
+    await database.writeState('focus', 'active focus');
+    await database.writeState('clock', 'active clock');
+    await database.writeState('companion', library);
+    await database.record(_session());
+    final restored = SessionRecord(
+      id: 'restored',
+      startedAt: DateTime.utc(2026, 1, 6, 12),
+      finishedAt: DateTime.utc(2026, 1, 6, 12, 3),
+      intended: const Duration(minutes: 3),
+      actual: const Duration(minutes: 3),
+      completed: true,
+    );
+
+    await database.replaceData(settings.encode(), [restored]);
+
+    expect(await database.readState('settings'), settings.encode());
+    expect(await database.readState('focus'), isNull);
+    expect(await database.readState('clock'), isNull);
+    expect(await database.readState('companion'), library);
+    expect((await database.sessions()).single.id, 'restored');
+
+    await database.replaceData(const AppSettings().encode(), [], clearPacks: true);
+
+    expect(await database.readState('companion'), isNull);
+    expect(await database.sessions(), isEmpty);
+  });
 }
 
 SessionRecord _session() => SessionRecord(
