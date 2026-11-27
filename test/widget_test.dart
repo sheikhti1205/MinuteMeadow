@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:companion_focus/app/app.dart';
 import 'package:companion_focus/app/bootstrap.dart';

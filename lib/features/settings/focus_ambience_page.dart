@@ -174,9 +174,9 @@ class _FocusAmbiencePageState extends State<FocusAmbiencePage> {
                 ],
               ),
               if (_saving)
-                const Semantics(
+                Semantics(
                   liveRegion: true,
-                  child: _Note('Saving…'),
+                  child: const _Note('Saving…'),
                 ),
               const SizedBox(height: 8),
               const _Note(

@@ -264,7 +264,7 @@ class _FocusWallpaperBackdropState extends State<FocusWallpaperBackdrop>
     super.didChangeDependencies();
     _mediaReducedMotion =
         MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    _tickerEnabled = TickerMode.of(context);
+    _tickerEnabled = TickerMode.valuesOf(context).enabled;
     _syncTicker();
   }
 
