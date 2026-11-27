@@ -120,6 +120,11 @@ Future<_Harness> _pump(
   return harness;
 }
 
+/// Scrolls the list until [finder] is on screen and aligns it to the top.
+///
+/// `ensureVisible` puts the target at the top edge, which moves a section
+/// header above it out of the sliver's onstage window. Scroll to a header
+/// when the test asserts that header.
 Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
   final scrollable = find.byType(Scrollable);
   for (var attempt = 0; attempt < 60; attempt++) {
@@ -158,7 +163,7 @@ void main() {
       findsNothing,
     );
 
-    await _scrollTo(tester, find.text('Theme'));
+    await _scrollTo(tester, find.text('Appearance'));
     expect(find.text('Appearance'), findsOneWidget);
     expect(find.text('Theme'), findsOneWidget);
     // The current value is shown in the pill and as the selected option.
@@ -174,7 +179,7 @@ void main() {
     expect(find.text('Import backup'), findsOneWidget);
     expect(find.text('Clear local data'), findsOneWidget);
 
-    await _scrollTo(tester, find.text('Details'));
+    await _scrollTo(tester, find.text('About'));
     final build = Branding.buildNumber > 0
         ? 'build ${Branding.buildNumber}'
         : (Branding.buildId.isEmpty ? 'local build' : 'CI build');
@@ -286,6 +291,29 @@ void main() {
     expect(find.text('Completion notifications'), findsOneWidget);
     expect(find.textContaining('Blocked in Android settings'), findsOneWidget);
     expect(harness.notifier.value.notifications, isTrue);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a failed permission check stays unknown instead of denying', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      settings: const AppSettings(notifications: true),
+      notificationsAvailable: true,
+      checkNotificationPermission: () async {
+        throw Exception('Notification platform unavailable.');
+      },
+    );
+
+    expect(find.text('Completion notifications'), findsOneWidget);
+    expect(find.textContaining('Blocked in Android settings'), findsNothing);
+    expect(
+      find.text('Alerts when a timer ends, even outside the app.'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

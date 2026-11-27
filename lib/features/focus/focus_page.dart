@@ -1260,81 +1260,90 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
 
   Widget _oneOffRow(ColorScheme scheme, {required bool enabled}) {
     final theme = Theme.of(context);
-    return Container(
+    // Same reason as the auto-advance row: the buttons must ink on the card,
+    // not on the page Material behind a coloured container.
+    return Material(
       key: FocusPage.oneOffPlanKey,
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
+      color: scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: scheme.outlineVariant),
+        side: BorderSide(color: scheme.outlineVariant),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 8, 4, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.edit_note_rounded,
-                size: 20,
-                color: scheme.onSurfaceVariant,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'One-off plan',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 4, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.edit_note_rounded,
+                  size: 20,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'One-off plan',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                    Text(
-                      'Applies to the next plan only',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
+                      Text(
+                        'Applies to the next plan only',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
+                ),
+                IconButton(
+                  key: FocusPage.discardOneOffKey,
+                  tooltip: 'Discard one-off plan',
+                  onPressed: enabled ? _discardOneOff : null,
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  color: scheme.onSurfaceVariant,
+                ),
+              ],
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                key: FocusPage.saveOneOffKey,
+                onPressed: enabled
+                    ? () => unawaited(_promptSavePreset(_activeSettings))
+                    : null,
+                icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                label: const Text('Save as preset'),
+                style: TextButton.styleFrom(
+                  foregroundColor: scheme.onSurface,
+                  minimumSize: const Size(48, 44),
                 ),
               ),
-              IconButton(
-                key: FocusPage.discardOneOffKey,
-                tooltip: 'Discard one-off plan',
-                onPressed: enabled ? _discardOneOff : null,
-                icon: const Icon(Icons.close_rounded, size: 18),
-                color: scheme.onSurfaceVariant,
-              ),
-            ],
-          ),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              key: FocusPage.saveOneOffKey,
-              onPressed: enabled
-                  ? () => unawaited(_promptSavePreset(_activeSettings))
-                  : null,
-              icon: const Icon(Icons.bookmark_add_outlined, size: 18),
-              label: const Text('Save as preset'),
-              style: TextButton.styleFrom(
-                foregroundColor: scheme.onSurface,
-                minimumSize: const Size(48, 44),
-              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
   Widget _autoAdvanceRow(ColorScheme scheme, {required bool enabled}) {
     final theme = Theme.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
+    // A ListTile paints its ripple on the nearest Material, so the card fill
+    // and seam live on the Material itself. A coloured DecoratedBox around the
+    // row would hide that feedback.
+    return Material(
+      color: scheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: scheme.outlineVariant),
+        side: BorderSide(color: scheme.outlineVariant),
       ),
+      clipBehavior: Clip.antiAlias,
       child: SwitchListTile.adaptive(
         key: FocusPage.autoAdvanceKey,
         value: _plan.autoAdvance,

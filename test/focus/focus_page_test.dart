@@ -114,6 +114,36 @@ Future<void> _start(WidgetTester tester) async {
   await tester.pump();
 }
 
+/// The preset strip scrolls horizontally, so a chip near its end is laid out
+/// but clipped. Reveal it the way a user would before tapping it.
+Future<void> _selectPreset(WidgetTester tester, String name) async {
+  final chip = find.text(name);
+  await tester.ensureVisible(chip);
+  await tester.pump();
+  await tester.tap(chip);
+  await tester.pump();
+}
+
+/// Opens a preset manager row menu and lets the route settle. A menu is laid
+/// out with the size of its opening animation, so on its first frame it is
+/// neither painted nor hit-testable; a row near the sheet's fold has to be
+/// scrolled into view before its button can be tapped.
+Future<void> _openPresetMenu(WidgetTester tester, String presetId) async {
+  await tester.ensureVisible(
+    find.byKey(ValueKey('focus-preset-row-$presetId')),
+  );
+  await tester.pump();
+  await tester.tap(find.byKey(ValueKey('focus-preset-menu-$presetId')));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+}
+
+Future<void> _tapPresetMenuAction(WidgetTester tester, String label) async {
+  await tester.tap(find.text(label));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+}
+
 /// Advances the page clock and lets the 500 ms ticker deliver the outcome and
 /// any single auto-advance transition.
 Future<void> _elapse(
@@ -286,8 +316,7 @@ void main() {
     );
 
     await tester.pumpWidget(host());
-    await tester.tap(find.text('Deep work'));
-    await tester.pump();
+    await _selectPreset(tester, 'Deep work');
     expect(find.text('50:00'), findsOneWidget);
     expect(find.text('50 min'), findsOneWidget);
     expect(find.text('10 min'), findsOneWidget);
@@ -1126,23 +1155,13 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.tap(
-      find.byKey(const ValueKey('focus-preset-menu-custom-3')),
-    );
-    await tester.pump();
-    await tester.tap(find.text('Set as default'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await _openPresetMenu(tester, 'custom-3');
+    await _tapPresetMenuAction(tester, 'Set as default');
     expect(find.text('Default: Writing'), findsOneWidget);
 
-    await tester.tap(
-      find.byKey(const ValueKey('focus-preset-menu-custom-3')),
-    );
-    await tester.pump();
+    await _openPresetMenu(tester, 'custom-3');
     expect(find.text('Delete'), findsNothing);
-    await tester.tap(find.text('Duplicate'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await _tapPresetMenuAction(tester, 'Duplicate');
     expect(
       find.descendant(
         of: find.byKey(FocusPage.presetManagerKey),
@@ -1151,13 +1170,8 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.tap(
-      find.byKey(const ValueKey('focus-preset-menu-custom-4')),
-    );
-    await tester.pump();
-    await tester.tap(find.text('Delete'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await _openPresetMenu(tester, 'custom-4');
+    await _tapPresetMenuAction(tester, 'Delete');
     expect(find.text('Delete Writing copy?'), findsOneWidget);
     await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
     await tester.pump();
@@ -1196,12 +1210,8 @@ void main() {
     await tester.tap(find.byKey(FocusPage.managePresetsKey));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(
-      find.byKey(const ValueKey('focus-preset-menu-sprint')),
-    );
-    await tester.pump();
-    await tester.tap(find.text('Edit values'));
-    await tester.pump();
+    await _openPresetMenu(tester, 'sprint');
+    await _tapPresetMenuAction(tester, 'Edit values');
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.byKey(FocusPage.updatePresetKey), findsOneWidget);
@@ -1222,12 +1232,8 @@ void main() {
     await tester.tap(find.byKey(FocusPage.managePresetsKey));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(
-      find.byKey(const ValueKey('focus-preset-menu-sprint')),
-    );
-    await tester.pump();
-    await tester.tap(find.text('Rename'));
-    await tester.pump();
+    await _openPresetMenu(tester, 'sprint');
+    await _tapPresetMenuAction(tester, 'Rename');
     await tester.pump(const Duration(milliseconds: 500));
 
     await tester.enterText(find.byKey(FocusPage.presetNameFieldKey), 'Quick');

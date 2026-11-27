@@ -353,7 +353,10 @@ void main() {
     await _showMode(tester, 'Countdown');
     await _showMode(tester, 'Stopwatch');
 
-    expect(find.text('00:03.0'), findsOneWidget);
+    // The paused readout and the lap split and total all format to the same
+    // text, so name the primary readout here and keep the lap row assertion.
+    final readout = tester.widget<Text>(find.byKey(ClockPage.timeKey));
+    expect(readout.data, '00:03.0');
     expect(find.text('Resume'), findsOneWidget);
     expect(find.text('Lap 1'), findsOneWidget);
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -1291,31 +1292,33 @@ class _DurationFields extends StatelessWidget {
         validator: (String? value) => _validateUnit(value, maximum: 59),
       ),
     ];
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-        if (constraints.maxWidth < 216 * textScale) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              for (var index = 0; index < fields.length; index++) ...<Widget>[
-                if (index > 0) const SizedBox(height: 8),
-                fields[index],
-              ],
-            ],
-          );
-        }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Expanded(child: fields[0]),
-            const SizedBox(width: 8),
-            Expanded(child: fields[1]),
-            const SizedBox(width: 8),
-            Expanded(child: fields[2]),
+    // AlertDialog asks its content for intrinsic dimensions before it lays
+    // anything out, so a LayoutBuilder cannot be used here. The three labelled
+    // fields give the dialog an intrinsic width near 336dp, it insets itself
+    // by 40dp on each side, and its content padding is 24dp per side.
+    final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final contentWidth = math.min(screenWidth - 80, 336.0) - 48;
+    if (contentWidth < 216 * textScale) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          for (var index = 0; index < fields.length; index++) ...<Widget>[
+            if (index > 0) const SizedBox(height: 8),
+            fields[index],
           ],
-        );
-      },
+        ],
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Expanded(child: fields[0]),
+        const SizedBox(width: 8),
+        Expanded(child: fields[1]),
+        const SizedBox(width: 8),
+        Expanded(child: fields[2]),
+      ],
     );
   }
 }

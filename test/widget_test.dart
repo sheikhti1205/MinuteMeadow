@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:companion_focus/app/app.dart';
@@ -18,6 +19,7 @@ import 'package:companion_focus/features/settings/settings_page.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -62,13 +64,15 @@ Future<void> _pumpUntil(WidgetTester tester, Finder finder) async {
   expect(finder, findsWidgets, reason: 'Expected $finder to appear.');
 }
 
-/// Answers the local-notifications channel before any page mounts.
+/// Binds the Android notifications implementation and answers its channel.
 ///
-/// Opening Settings asks the host for the current Android permission. That
-/// request must resolve before the first pump instead of reaching a missing
-/// platform bridge, so the test reports one deterministic state: initialized,
-/// with notifications not granted.
+/// The generated plugin registrant does not run under `flutter test`, so the
+/// plugin would otherwise throw before any call reaches a platform bridge.
+/// Register the real Android Dart implementation, as the app does on device,
+/// and answer the host calls so the test reports one deterministic state:
+/// initialized, with notifications not granted.
 void _mockNotifications() {
+  AndroidFlutterLocalNotificationsPlugin.registerWith();
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(
         const MethodChannel('dexterous.com/flutter/local_notifications'),
@@ -182,6 +186,20 @@ void main() {
       settingsPage.checkNotificationPermission,
       TimerNotifications.available ? isNotNull : isNull,
     );
+    // The registered Android implementation reaches the stubbed host and
+    // reports the real denied state, proving the binding instead of relying on
+    // an error that never reaches the channel.
+    final checkPermission = settingsPage.checkNotificationPermission;
+    if (checkPermission != null) {
+      bool? allowed;
+      unawaited(checkPermission().then((value) {
+        allowed = value;
+      }));
+      for (var attempt = 0; attempt < 20 && allowed == null; attempt++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(allowed, isFalse);
+    }
     // The shell below the opaque settings route stops ticking, then resumes.
     expect(_tabTicker(tester, 0, skipOffstage: false).enabled, isFalse);
 
@@ -432,6 +450,14 @@ void main() {
     await tester.tap(find.byKey(InsightsHistoryPage.editorSaveKey));
     await _pumpUntil(tester, find.text('Session updated.'));
     expect(find.text('Deep work'), findsWidgets);
+
+    // The edit confirmation is still on screen. Clear it so the delete's own
+    // confirmation appears immediately instead of queueing behind it for the
+    // rest of the first snackbar's display time.
+    ScaffoldMessenger.of(
+      tester.element(find.byType(InsightsHistoryPage)),
+    ).hideCurrentSnackBar();
+    await tester.pump(const Duration(milliseconds: 300));
 
     final stored = await tester.runAsync(
       () => database.sessions().then((records) => records.single),
