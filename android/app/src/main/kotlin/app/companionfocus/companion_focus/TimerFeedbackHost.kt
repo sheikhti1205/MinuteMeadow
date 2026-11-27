@@ -144,7 +144,7 @@ internal class TimerFeedbackHost(private val context: Context) {
         val channel = notificationChannel(channelId)
         if (channel != null) {
             if (channel.importance < NotificationManager.IMPORTANCE_DEFAULT) return
-            if (!channel.enableVibration) return
+            if (!channel.shouldVibrate()) return
         }
         if (!allowsVibration()) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
