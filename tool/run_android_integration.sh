@@ -15,7 +15,8 @@ bound="${INTEGRATION_BOUND:-12m}"
 target="$(pwd)/integration_test/app_test.dart"
 device_log="${RUNNER_TEMP:-/tmp}/device-test.log"
 relevant_log="${RUNNER_TEMP:-/tmp}/device-relevant.log"
-results_dir="android/app/build/outputs/androidTest-results"
+# The generated Android root build redirects subprojects to <repo>/build/<name>.
+results_dir="build/app/outputs/androidTest-results"
 
 adb=adb
 if ! command -v adb >/dev/null 2>&1; then
@@ -63,16 +64,25 @@ count_attr() {
 
 tests_run=0
 tests_failed=0
+tests_errors=0
+tests_skipped=0
 if [ -d "${results_dir}" ]; then
   tests_run=$(count_attr tests)
   tests_failed=$(count_attr failures)
-  echo "phase: instrumented results: ${tests_run} run, ${tests_failed} failed"
+  tests_errors=$(count_attr errors)
+  tests_skipped=$(count_attr skipped)
+  echo "phase: instrumented results: ${tests_run} run, ${tests_failed} failed, ${tests_errors} errors, ${tests_skipped} skipped"
 else
   echo 'phase: no instrumented result directory was written'
 fi
 
 if [ "${code}" -eq 0 ] && [ "${tests_run}" -eq 0 ]; then
   echo "::error::Gradle reported success without a single recorded instrumented test"
+  code=3
+fi
+
+if [ "${code}" -eq 0 ] && [ "$((tests_failed + tests_errors + tests_skipped))" -ne 0 ]; then
+  echo "::error::instrumented results report failures, errors or skips although Gradle exited cleanly"
   code=3
 fi
 

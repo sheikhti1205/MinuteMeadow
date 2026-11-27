@@ -33,11 +33,14 @@ kotlin {
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 
-    // The instrumented entrypoint in android/app/src/androidTest runs the Dart
-    // integration suite on the device, so no host VM service is involved.
-    androidTestImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test:rules:1.6.1")
+    // integration_test exposes the AndroidX test artifacts as api dependencies,
+    // and Android Gradle Plugin consistent resolution pins the instrumented
+    // runtime classpath to the versions the app runtime already resolved.
+    // Declaring those same versions keeps the entrypoint compilable and keeps
+    // the test APK self-contained, without forcing new production versions.
+    androidTestImplementation("junit:junit:4.12")
+    androidTestImplementation("androidx.test:runner:1.3.0")
+    androidTestImplementation("androidx.test:rules:1.2.0")
 }
 
 flutter {
