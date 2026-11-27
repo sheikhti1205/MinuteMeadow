@@ -38,8 +38,9 @@ echo "phase: emulator ready at $(date -u +%H:%M:%S)"
 logcat_pid=$!
 
 echo "phase: flutter test starting at $(date -u +%H:%M:%S), bounded to ${bound}"
+# Attach directly to the device VM service after a pre-test disconnect.
 timeout --signal=INT --kill-after=60s "${bound}" \
-  flutter test integration_test -d "${serial}" --reporter expanded
+  flutter test integration_test -d "${serial}" --reporter expanded --no-dds
 code=$?
 
 stop_logcat
@@ -53,8 +54,9 @@ if [ "${code}" -ne 0 ]; then
   echo "::group::device log (test, launch and crash lines)"
   captured=$(wc -l < "${device_log}" 2>/dev/null || echo 0)
   echo "captured device lines: ${captured}"
-  grep -E '(Start proc|Displayed|has died|AndroidRuntime|FATAL|beginning of crash|flutter)' \
-    "${device_log}" >"${relevant_log}" 2>/dev/null || true
+  grep -E '(app\.companionfocus|AndroidRuntime|FATAL|beginning of crash|flutter)' \
+    "${device_log}" 2>/dev/null \
+    | sed -E 's#(is listening on )[^ ]+#\1[redacted]#' >"${relevant_log}" || true
   if [ -s "${relevant_log}" ]; then
     tail -n 200 "${relevant_log}"
   else
