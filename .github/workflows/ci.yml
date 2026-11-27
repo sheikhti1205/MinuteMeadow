@@ -16,6 +16,10 @@ on:
         description: Build the Android debug APK
         type: boolean
         default: false
+      build_android_signed:
+        description: Build, sign and retain the Android release APK through the android-signing environment
+        type: boolean
+        default: false
       include_development_tools:
         description: Include the Animation laboratory and geometric catalogue in the web artifact
         type: boolean
@@ -25,23 +29,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: flutter-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build_web }}-${{ inputs.build_android }}-${{ inputs.include_development_tools }}
+  group: flutter-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.build_web }}-${{ inputs.build_android }}-${{ inputs.build_android_signed }}-${{ inputs.include_development_tools }}
   cancel-in-progress: true
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      version_id: ${{ steps.version.outputs.version_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Resolve the shared build version
+        id: version
         env:
-          ANDROID_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.build_android == true }}
+          ANDROID_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_android || inputs.build_android_signed) }}
         run: python3 tool/ci_version.py
       - name: Test the build version calculator
         run: python3 tool/test_ci_version.py
+      - name: Refuse a signed build outside main
+        if: github.event_name == 'workflow_dispatch' && inputs.build_android_signed && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error title=Signed builds only run from main::This run targets ${GITHUB_REF}. Dispatch the signed build from the latest main commit."
+          exit 1
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.44.0'
@@ -54,7 +68,7 @@ jobs:
       - run: flutter analyze --fatal-infos
       - run: flutter test
       - name: Verify the Android build is from current main
-        if: github.event_name == 'workflow_dispatch' && inputs.build_android
+        if: github.event_name == 'workflow_dispatch' && (inputs.build_android || inputs.build_android_signed)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -107,6 +121,90 @@ jobs:
         with:
           name: companion-focus-android-debug
           path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  android_signed:
+    name: Android signed release
+    needs: validate
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.build_android_signed &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: android-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.44.0'
+          channel: stable
+      - name: Prepare the Android runner
+        run: |
+          flutter create --empty --no-pub --platforms=android --org=app.companionfocus --project-name=companion_focus .
+          git show HEAD:pubspec.lock > pubspec.lock
+      - run: flutter pub get --enforce-lockfile
+      - name: Verify the signed build targets current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [ "$latest_main" != "$GITHUB_SHA" ]; then
+            echo "::error title=Stale signed build::main is at ${latest_main}, but this run targets ${GITHUB_SHA}. Dispatch a new signed build from the latest main commit."
+            exit 1
+          fi
+      - name: Build the unsigned release APK
+        env:
+          VERSION_NAME: ${{ needs.validate.outputs.version }}
+          VERSION_CODE: ${{ needs.validate.outputs.version_code }}
+          VERSION_ID: ${{ needs.validate.outputs.version_id }}
+        run: |
+          flutter build apk --release \
+            --build-name="$VERSION_ID" \
+            --build-number="$VERSION_CODE" \
+            --dart-define=APP_VERSION="$VERSION_NAME" \
+            --dart-define=APP_BUILD_NUMBER="$VERSION_CODE" \
+            --dart-define=APP_BUILD_ID="$VERSION_ID"
+      - name: Sign and verify the release APK
+        id: sign
+        env:
+          MINUTEMEADOW_ANDROID_KEYSTORE_B64: ${{ secrets.MINUTEMEADOW_ANDROID_KEYSTORE_B64 }}
+          MINUTEMEADOW_ANDROID_STORE_PASSWORD: ${{ secrets.MINUTEMEADOW_ANDROID_STORE_PASSWORD }}
+          MINUTEMEADOW_ANDROID_CERT_SHA256: ${{ vars.MINUTEMEADOW_ANDROID_CERT_SHA256 }}
+          EXPECTED_PACKAGE: app.companionfocus.companion_focus
+          EXPECTED_VERSION_CODE: ${{ needs.validate.outputs.version_code }}
+          EXPECTED_VERSION_NAME: ${{ needs.validate.outputs.version_id }}
+        run: bash tool/sign_android_release.sh
+      - name: Report the signed build
+        env:
+          VERSION_ID: ${{ needs.validate.outputs.version_id }}
+          VERSION_CODE: ${{ needs.validate.outputs.version_code }}
+          APK_SHA256: ${{ steps.sign.outputs.apk_sha256 }}
+        run: |
+          {
+            echo "### Signed Android APK"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Package | \`app.companionfocus.companion_focus\` |"
+            echo "| Version | \`${VERSION_ID}\` |"
+            echo "| Version code | \`${VERSION_CODE}\` |"
+            echo "| APK SHA-256 | \`${APK_SHA256}\` |"
+            echo "| Retention | 1 day |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the signed release build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: companion-focus-android-signed
+          path: ${{ steps.sign.outputs.apk_path }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
