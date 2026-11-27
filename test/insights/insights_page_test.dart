@@ -91,6 +91,32 @@ void _useTallPhone(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+/// Scrolls the page until the text is built, then brings it fully on screen.
+Future<void> _revealText(WidgetTester tester, String text) async {
+  final target = find.text(text);
+  for (var attempt = 0; attempt < 12 && target.evaluate().isEmpty; attempt++) {
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -240));
+    await tester.pump();
+  }
+  if (target.evaluate().isNotEmpty) {
+    await tester.ensureVisible(target);
+    await tester.pump();
+  }
+}
+
+/// Anything that would present the Leaderboard as something to operate.
+bool _isActionable(Widget widget) => switch (widget) {
+  ButtonStyleButton() => true,
+  IconButton() => true,
+  FloatingActionButton() => true,
+  SwitchListTile() => true,
+  CheckboxListTile() => true,
+  InkWell(:final onTap) => onTap != null,
+  GestureDetector(:final onTap) => onTap != null,
+  ListTile(:final onTap) => onTap != null,
+  _ => false,
+};
+
 void main() {
   testWidgets('empty overview shows no sample statistics', (tester) async {
     _useTallPhone(tester);
@@ -124,6 +150,73 @@ void main() {
     expect(find.text('3'), findsOneWidget);
     expect(find.text('67%'), findsOneWidget);
     expect(find.text('1h 5m'), findsWidgets);
+
+    await _dispose(tester);
+  });
+
+  testWidgets('overview shows a Leaderboard section marked Coming soon', (
+    tester,
+  ) async {
+    _useTallPhone(tester);
+    await tester.pumpWidget(_host(sessions: _sessions()));
+    await tester.pump();
+    await _revealText(tester, 'Leaderboard');
+
+    expect(
+      find.descendant(
+        of: find.byType(InsightsPage),
+        matching: find.text('Leaderboard'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Coming soon'), findsOneWidget);
+
+    await _dispose(tester);
+  });
+
+  testWidgets('Leaderboard coming soon reads as one accessible statement', (
+    tester,
+  ) async {
+    _useTallPhone(tester);
+    final semantics = tester.ensureSemantics();
+    addTearDown(semantics.dispose);
+    await tester.pumpWidget(_host(sessions: _sessions()));
+    await tester.pump();
+    await _revealText(tester, 'Leaderboard');
+
+    expect(
+      find.bySemanticsLabel(
+        RegExp(r'Leaderboard[\s\S]*Coming soon|Coming soon[\s\S]*Leaderboard'),
+      ),
+      findsOneWidget,
+    );
+
+    await _dispose(tester);
+  });
+
+  testWidgets('Leaderboard coming soon is informational, not an action', (
+    tester,
+  ) async {
+    _useTallPhone(tester);
+    await tester.pumpWidget(_host(sessions: _sessions()));
+    await tester.pump();
+    await _revealText(tester, 'Leaderboard');
+
+    final leaderboard = find.text('Leaderboard');
+    expect(leaderboard, findsOneWidget);
+    expect(
+      find.ancestor(
+        of: leaderboard,
+        matching: find.byWidgetPredicate(_isActionable),
+      ),
+      findsNothing,
+    );
+
+    await tester.tap(leaderboard);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(InsightsHistoryPage), findsNothing);
+    expect(find.text('Coming soon'), findsOneWidget);
 
     await _dispose(tester);
   });
