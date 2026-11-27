@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:companion_focus/features/focus/focus_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -705,6 +707,59 @@ void main() {
       engine.startFocus();
       expect(engine.status, FocusStatus.running);
       expect(engine.planTarget, 2);
+    });
+  });
+
+  group('run label', () {
+    final start = DateTime.utc(2026, 11, 27, 9);
+
+    String snapshotJson({
+      required String status,
+      int? remainingMs,
+      String? label,
+    }) => jsonEncode(<String, Object?>{
+      'version': 3,
+      'id': 'run-labelled',
+      'phase': 'focus',
+      'status': status,
+      'startedAt': start.millisecondsSinceEpoch,
+      'anchor': start.millisecondsSinceEpoch,
+      'intendedMs': 1500000,
+      'remainingMs': remainingMs,
+      'finishedAt': null,
+      'completedFocusSessions': 0,
+      if (label != null) 'label': label,
+    });
+
+    test('encodes a decoded run label without changing the session', () {
+      final decoded = FocusSnapshot.tryDecode(
+        snapshotJson(
+          status: 'paused',
+          remainingMs: 720000,
+          label: 'Write report',
+        ),
+      );
+
+      expect(decoded, isNotNull);
+      final snapshot = decoded!;
+      final encoded = jsonDecode(snapshot.encode()) as Map<String, dynamic>;
+      expect(encoded['label'], 'Write report');
+      expect(snapshot.status, FocusStatus.paused);
+      expect(snapshot.intended, const Duration(minutes: 25));
+      expect(snapshot.remaining, const Duration(minutes: 12));
+      expect(encoded['intendedMs'], 1500000);
+      expect(encoded['completedFocusSessions'], 0);
+    });
+
+    test('a legacy snapshot without a label stays label-free', () {
+      final decoded = FocusSnapshot.tryDecode(
+        snapshotJson(status: 'paused', remainingMs: 720000),
+      );
+
+      expect(decoded, isNotNull);
+      final snapshot = decoded!;
+      final encoded = jsonDecode(snapshot.encode()) as Map<String, dynamic>;
+      expect(encoded.containsKey('label'), isFalse);
     });
   });
 }

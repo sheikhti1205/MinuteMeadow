@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:companion_focus/design/companion_theme.dart';
 import 'package:companion_focus/features/focus/focus_page.dart';
 import 'package:companion_focus/features/focus/focus_stage.dart';
@@ -107,6 +109,26 @@ String _runningSnapshot({Duration ago = Duration.zero, int count = 0}) {
     finishedAt: null,
     completedFocusSessions: count,
   ).encode();
+}
+
+/// A paused plan block that was renamed to [label] before the timer stopped.
+String _labelledPausedSnapshot({String label = 'Write report'}) {
+  final start = DateTime.utc(2026, 11, 27, 9);
+  return jsonEncode(<String, Object?>{
+    'version': 3,
+    'id': 'paused-labelled',
+    'phase': 'focus',
+    'status': 'paused',
+    'startedAt': start.millisecondsSinceEpoch,
+    'anchor': start.millisecondsSinceEpoch,
+    'intendedMs': 1500000,
+    'remainingMs': 720000,
+    'finishedAt': null,
+    'completedFocusSessions': 0,
+    'planTarget': 4,
+    'planCompleted': 0,
+    'label': label,
+  });
 }
 
 Future<void> _start(WidgetTester tester) async {
@@ -877,6 +899,7 @@ void main() {
     );
     await tester.pump();
 
+    expect(find.textContaining('Done around'), findsOneWidget);
     final action = find.byKey(FocusPage.primaryActionKey);
     final page = tester.getRect(find.byType(FocusPage));
     final actionRect = tester.getRect(action);
@@ -1707,6 +1730,200 @@ void main() {
     expect(abandoned?.plan?.isOneOff, isFalse);
     expect(abandoned?.plan?.defaultId, FocusPreset.defaultsId);
     expect(settings.value, defaultsBefore);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('previews the plan total, finish clock and manual estimate', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        onOutcome: (outcome, snapshot) async {},
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    final summaryText = find.textContaining('Done around');
+    final manualNote = find.textContaining(
+      RegExp('assuming no waiting', caseSensitive: false),
+    );
+    expect(summaryText, findsOneWidget);
+    String summary() => tester.widget<Text>(summaryText).data!;
+
+    final first = summary();
+    expect(first, contains('2h 10m in all'));
+    expect(manualNote, findsOneWidget);
+
+    clock.advance(const Duration(minutes: 30));
+    await tester.pump(const Duration(seconds: 31));
+    expect(summary(), isNot(first));
+    expect(summary(), contains('2h 10m in all'));
+    expect(manualNote, findsOneWidget);
+
+    await tester.tap(find.byKey(FocusPage.autoAdvanceKey));
+    await tester.pump();
+    expect(manualNote, findsNothing);
+    expect(summary(), contains('2h 10m in all'));
+
+    await tester.tap(find.byKey(FocusPage.autoAdvanceKey));
+    await tester.pump();
+    expect(manualNote, findsOneWidget);
+    expect(
+      find.byKey(FocusPage.primaryActionKey).hitTestable(),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('active focus exposes the full block timeline', (tester) async {
+    final settings = ValueNotifier(const FocusSettings());
+    final events = <bool>[];
+    final handle = tester.ensureSemantics();
+    addTearDown(settings.dispose);
+    try {
+      await tester.pumpWidget(
+        _host(
+          settings: settings,
+          companionStageBuilder: (context) => const SizedBox.expand(),
+          onOutcome: (outcome, snapshot) async {},
+          onSnapshot: (snapshot) async {},
+          onImmersiveChanged: events.add,
+        ),
+      );
+      await tester.pump();
+      expect(events, [false]);
+
+      await _start(tester);
+      expect(events, [false, true]);
+
+      final timeline = find.bySemanticsLabel(
+        RegExp('timeline', caseSensitive: false),
+      );
+      expect(timeline, findsWidgets);
+      final spoken = [
+        for (var index = 0; index < timeline.evaluate().length; index++)
+          tester
+              .getSemantics(timeline.at(index))
+              .getSemanticsData()
+              .label,
+      ].join(' ').toLowerCase();
+      expect(spoken, contains('4'));
+      expect(spoken, contains('focus'));
+      expect(spoken, contains('break'));
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  testWidgets('names a run before Start and renames it while paused', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    final outcomes = <(FocusOutcome, String)>[];
+    final snapshots = <String>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async => snapshots.add(snapshot),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(TextField), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'Write report');
+    await tester.pump();
+    expect(find.text('Write report'), findsOneWidget);
+
+    await _start(tester);
+    final started = jsonDecode(snapshots.last) as Map<String, dynamic>;
+    expect(started['label'], 'Write report');
+    expect(started['status'], 'running');
+    expect(started['intendedMs'], 1500000);
+
+    await _elapse(tester, clock, const Duration(minutes: 5));
+    await tester.tap(find.byKey(FocusPage.primaryActionKey));
+    await tester.pump();
+
+    expect(find.byType(TextField), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'Write report v2');
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(find.text('Write report v2'), findsOneWidget);
+    final renamed = jsonDecode(snapshots.last) as Map<String, dynamic>;
+    expect(renamed['label'], 'Write report v2');
+    expect(renamed['status'], 'paused');
+    expect(renamed['intendedMs'], 1500000);
+    expect(renamed['remainingMs'], 1200000);
+
+    await tester.tap(find.byKey(FocusPage.primaryActionKey));
+    await tester.pump();
+    await _elapse(tester, clock, const Duration(minutes: 20));
+
+    expect(outcomes, hasLength(1));
+    final (outcome, snapshot) = outcomes.single;
+    expect(outcome.completed, isTrue);
+    expect(outcome.intended, const Duration(minutes: 25));
+    expect(outcome.actual, const Duration(minutes: 25));
+    final decoded = FocusSnapshot.tryDecode(snapshot);
+    expect(decoded?.preset, FocusPreset.defaults);
+    expect(decoded?.planTarget, 4);
+    expect(decoded?.planCompleted, 1);
+    expect(jsonDecode(snapshot)['label'], 'Write report v2');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('restores a labelled pause and finishes with the same label', (
+    tester,
+  ) async {
+    final clock = _PageClock();
+    final settings = ValueNotifier(const FocusSettings());
+    final outcomes = <(FocusOutcome, String)>[];
+    addTearDown(settings.dispose);
+
+    await tester.pumpWidget(
+      _host(
+        settings: settings,
+        clock: clock,
+        snapshot: _labelledPausedSnapshot(),
+        onOutcome: (outcome, snapshot) async =>
+            outcomes.add((outcome, snapshot)),
+        onSnapshot: (snapshot) async {},
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Paused. Continue when you are ready.'), findsOneWidget);
+    expect(find.text('Write report'), findsOneWidget);
+
+    await tester.tap(find.byKey(FocusPage.primaryActionKey));
+    await tester.pump();
+    await _elapse(tester, clock, const Duration(minutes: 12));
+
+    expect(outcomes, hasLength(1));
+    final (outcome, snapshot) = outcomes.single;
+    expect(outcome.completed, isTrue);
+    expect(outcome.intended, const Duration(minutes: 25));
+    expect(outcome.actual, const Duration(minutes: 25));
+    expect(jsonDecode(snapshot)['label'], 'Write report');
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

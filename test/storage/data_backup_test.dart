@@ -14,6 +14,39 @@ Map<String, Object> _legacySessionJson() => {
   'completed': true,
 };
 
+Map<String, Object?> _defaultFocusPresetJson() => <String, Object?>{
+  'id': 'defaults',
+  'name': 'Default',
+  'settings': <String, Object?>{
+    'focusMinutes': 25,
+    'shortBreakMinutes': 5,
+    'longBreakMinutes': 15,
+    'sessionsPerCycle': 4,
+  },
+};
+
+Map<String, Object?> _schema2BackupJson() => <String, Object?>{
+  'schema': 2,
+  'app': 'minutemeadow',
+  'scope': <String>['settings', 'sessions', 'focusPresets', 'clockPresets'],
+  'settings': const AppSettings().toJson(),
+  'sessions': <Object?>[
+    {
+      ..._legacySessionJson(),
+      'label': 'Deep work',
+      'note': 'Phone stayed in the drawer.',
+    },
+  ],
+  'focusPresets': <String, Object?>{
+    'defaultId': 'defaults',
+    'autoAdvance': false,
+    'presets': <Object?>[_defaultFocusPresetJson()],
+  },
+  'clockPresets': <String, Object?>{
+    'presets': <Object?>[],
+  },
+};
+
 void main() {
   test('decodes a schema 1 backup saved before labels and notes', () {
     final source = jsonEncode({
@@ -105,5 +138,112 @@ void main() {
     });
 
     expect(() => DataBackup.decode(source), throwsFormatException);
+  });
+
+  test('decodes an opt-in schema 2 backup with scoped presets', () {
+    final backup = DataBackup.decode(jsonEncode(_schema2BackupJson()));
+
+    expect(backup.settings.focusMinutes, 25);
+    expect(backup.settings.themeMode.name, 'system');
+    final session = backup.sessions.single;
+    expect(session.id, 'legacy');
+    expect(session.label, 'Deep work');
+    expect(session.note, 'Phone stayed in the drawer.');
+  });
+
+  test('rejects duplicate focus preset ids in a schema 2 backup', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    final focusPresets = json['focusPresets']! as Map<String, Object?>;
+    (focusPresets['presets']! as List<Object?>).add(_defaultFocusPresetJson());
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
+  });
+
+  test('rejects a schema 2 backup whose default preset is missing', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    final focusPresets = json['focusPresets']! as Map<String, Object?>;
+    focusPresets['defaultId'] = 'missing';
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
+  });
+
+  test('rejects one-off focus state in a schema 2 backup', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    final focusPresets = json['focusPresets']! as Map<String, Object?>;
+    focusPresets['oneOff'] = <String, Object?>{
+      'focusMinutes': 30,
+      'shortBreakMinutes': 5,
+      'longBreakMinutes': 15,
+      'sessionsPerCycle': 4,
+    };
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
+  });
+
+  test('rejects running state in a schema 2 backup', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    json['running'] = true;
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
+  });
+
+  test('rejects companion packs in a schema 2 backup', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    json['packs'] = <Object?>[];
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
+  });
+
+  test('rejects companion media in a schema 2 backup', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    json['media'] = <Object?>[];
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
+  });
+
+  test('rejects invalid focus preset durations in a schema 2 backup', () {
+    expect(
+      () => DataBackup.decode(jsonEncode(_schema2BackupJson())),
+      returnsNormally,
+    );
+
+    final json = _schema2BackupJson();
+    final focusPresets = json['focusPresets']! as Map<String, Object?>;
+    final preset = (focusPresets['presets']! as List<Object?>).single
+        as Map<String, Object?>;
+    final settings = preset['settings']! as Map<String, Object?>;
+    settings['focusMinutes'] = 0;
+
+    expect(() => DataBackup.decode(jsonEncode(json)), throwsFormatException);
   });
 }

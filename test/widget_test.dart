@@ -70,18 +70,155 @@ Future<void> _pumpUntil(WidgetTester tester, Finder finder) async {
 /// plugin would otherwise throw before any call reaches a platform bridge.
 /// Register the real Android Dart implementation, as the app does on device,
 /// and answer the host calls so the test reports one deterministic state:
-/// initialized, with notifications not granted.
-void _mockNotifications() {
+/// initialized, with notifications granted only when [enabled] is true.
+void _mockNotifications({bool enabled = false}) {
   AndroidFlutterLocalNotificationsPlugin.registerWith();
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(
         const MethodChannel('dexterous.com/flutter/local_notifications'),
         (call) async => switch (call.method) {
           'initialize' => true,
-          'areNotificationsEnabled' => false,
+          'areNotificationsEnabled' => enabled,
           _ => null,
         },
       );
+}
+
+/// Completion requests the app sends to the host, and the platform feedback it
+/// must not fall back to.
+typedef _TimerFeedback = ({
+  List<MethodCall> completions,
+  List<String> legacy,
+  List<String> unexpected,
+});
+
+/// Records what the app asks the host to play for a finished timer.
+///
+/// Completion feedback travels on its own channel, so a test observes the
+/// request instead of the platform sound or vibration behind it. The legacy
+/// platform calls stay recorded because a restored finish must not fall back to
+/// them. Every call is answered with null, and a method other than
+/// `playCompletion` is kept apart so an unexpected request fails an assertion
+/// instead of surfacing as a channel exception the app would have to swallow.
+_TimerFeedback _captureTimerFeedback() {
+  final completions = <MethodCall>[];
+  final legacy = <String>[];
+  final unexpected = <String>[];
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(
+    const MethodChannel('app.companionfocus/timer_feedback'),
+    (call) async {
+      if (call.method == 'playCompletion') {
+        completions.add(call);
+      } else {
+        unexpected.add(call.method);
+      }
+      return null;
+    },
+  );
+  messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+    if (call.method == 'SystemSound.play' ||
+        call.method == 'HapticFeedback.vibrate') {
+      legacy.add(call.method);
+    }
+    return null;
+  });
+  addTearDown(() {
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('app.companionfocus/timer_feedback'),
+      null,
+    );
+    messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+  });
+  return (completions: completions, legacy: legacy, unexpected: unexpected);
+}
+
+/// A control a user can operate, whichever widget the app chooses for it.
+///
+/// A recovery action could become a text button, a trailing icon button or a
+/// tappable row, and each of those keeps an ink response, button or list tile
+/// above its wording.
+final Finder _operable = find.byWidgetPredicate(
+  (widget) =>
+      widget is InkResponse ||
+      widget is ButtonStyleButton ||
+      widget is Switch ||
+      widget is ListTile ||
+      widget is GestureDetector,
+  description: 'an operable settings control',
+);
+
+/// Whether [pattern] labels a control the user can tap.
+///
+/// The check reads the wording a user sees and asks whether a control wraps it,
+/// so it survives a different widget choice without pinning exact copy.
+bool _hasTappableLabel(WidgetTester tester, Pattern pattern) {
+  final labels = find.descendant(
+    of: find.byType(SettingsPage),
+    matching: find.textContaining(pattern),
+  );
+  for (var index = 0; index < labels.evaluate().length; index++) {
+    final control = find.ancestor(of: labels.at(index), matching: _operable);
+    if (control.evaluate().isNotEmpty) return true;
+  }
+  return false;
+}
+
+/// Looks for a tappable label, scrolling the pushed Settings list when the
+/// control may sit below the first viewport.
+///
+/// A live companion stage behind the route never settles, so this pumps a
+/// bounded number of frames instead of waiting for the whole tree.
+Future<bool> _scrollForTappableLabel(
+  WidgetTester tester,
+  Pattern pattern,
+) async {
+  final scrollable = find
+      .descendant(
+        of: find.byType(SettingsPage),
+        matching: find.byType(Scrollable),
+      )
+      .first;
+  for (var attempt = 0; attempt < 12; attempt++) {
+    if (_hasTappableLabel(tester, pattern)) return true;
+    await tester.drag(scrollable, const Offset(0, -220));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+  }
+  return _hasTappableLabel(tester, pattern);
+}
+
+/// Wording a user would read on a control for opening the system notification
+/// settings.
+///
+/// The blocked switch row already says "Blocked in Android settings", so each
+/// alternative requires an actionable verb or the word "permission" to avoid
+/// matching that explanation.
+final _settingsRecoveryLabel = RegExp(
+  r'open.{0,24}settings|manage.{0,24}settings|allow.{0,32}settings|'
+  r'(grant|change|fix).{0,32}permission|'
+  r'notification (settings|permission)|system settings|app settings',
+  caseSensitive: false,
+);
+
+/// Wording a user would read on a control that previews the completion alert.
+///
+/// Both a preview word and an alert word must appear near each other, so an
+/// unrelated "test" elsewhere on the page does not count as the affordance.
+final _previewAlertLabel = RegExp(
+  r'\b(test|try|preview|sample)\b.{0,32}'
+  r'\b(alert|notification|sound|vibration|feedback|chime)\b|'
+  r'\b(alert|notification|sound|vibration|feedback|chime)\b.{0,32}'
+  r'\b(test|try|preview|sample)\b',
+  caseSensitive: false,
+);
+
+/// Opens the shell's Settings route and lets its first frame settle.
+Future<void> _openSettings(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Settings'));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 350));
 }
 
 /// Wraps a timer snapshot the way the app persists one, without reading the
@@ -209,6 +346,162 @@ void main() {
     expect(find.text('MinuteMeadow'), findsOneWidget);
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(_tabTicker(tester, 0).enabled, isTrue);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a revoked permission keeps completion feedback in the foreground', (
+    tester,
+  ) async {
+    final feedback = _captureTimerFeedback();
+    final app = _app(
+      settings: const AppSettings(
+        focusMinutes: 1,
+        notifications: true,
+        sound: true,
+        haptics: false,
+      ),
+    );
+    // The boot clock jumps while the process stays alive, so returning to the
+    // app discovers an expired timer in the foreground, not on a cold start.
+    // Install this after _app so its default boot-clock stub does not win.
+    var bootElapsedMs = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('app.companionfocus/boot_clock'),
+          (call) async => call.method == 'sample'
+              ? <String, int>{'bootCount': 0, 'elapsedMs': bootElapsedMs}
+              : null,
+        );
+
+    await tester.pumpWidget(app);
+    await _frames(tester, 6);
+
+    final primary = find.byKey(FocusPage.primaryActionKey);
+    await tester.ensureVisible(primary);
+    await tester.pump();
+    await tester.tap(primary);
+    await _frames(tester, 4);
+    expect(find.byKey(FocusPage.slideToQuitKey), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    // Let the background reading finish before the clock jumps, so the jump is
+    // measured as time the process missed.
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 50));
+
+    bootElapsedMs = const Duration(minutes: 2).inMilliseconds;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await _pumpUntil(tester, find.text('Focus complete'));
+    await _awaitPrimaryAction(tester);
+
+    expect(
+      feedback.completions,
+      hasLength(1),
+      reason: 'A revoked permission and stored notification intent must not '
+          'suppress the in-app completion alert while the app is in the '
+          'foreground.',
+    );
+    final request = feedback.completions.single.arguments;
+    expect(
+      request,
+      isA<Map<Object?, Object?>>(),
+      reason: 'The completion request must name the feedback it wants.',
+    );
+    expect(
+      (request as Map<Object?, Object?>)['sound'],
+      isTrue,
+      reason: 'Sound was enabled for the completion alert.',
+    );
+    expect(
+      feedback.unexpected,
+      isEmpty,
+      reason: 'The agreed channel carries the playCompletion request alone.',
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a cold start never replays completion feedback', (tester) async {
+    final feedback = _captureTimerFeedback();
+    final now = DateTime.now().toUtc();
+    final expired = FocusSnapshot(
+      id: 'expired-session',
+      phase: FocusPhase.focus,
+      status: FocusStatus.running,
+      startedAt: now.subtract(const Duration(minutes: 26)),
+      anchor: now.subtract(const Duration(minutes: 26)),
+      intended: const Duration(minutes: 25),
+      remaining: null,
+      finishedAt: null,
+      completedFocusSessions: 0,
+      planTarget: 1,
+      planSettings: const FocusSettings(),
+    ).encode();
+
+    await tester.pumpWidget(_app(focus: expired));
+    await _frames(tester, 6);
+    await _pumpUntil(tester, find.text('Focus complete'));
+    await _awaitPrimaryAction(tester);
+
+    expect(
+      feedback.completions,
+      isEmpty,
+      reason: 'A session that ended while the app was not running must settle '
+          'without asking the host to play completion feedback.',
+    );
+    expect(
+      feedback.legacy,
+      isEmpty,
+      reason: 'A restored finish must not fall back to the in-app click or '
+          'vibration either.',
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('blocked notifications offer an Android settings recovery action', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(settings: const AppSettings(notifications: true)),
+    );
+    await _frames(tester, 6);
+    await _openSettings(tester);
+    await _pumpUntil(
+      tester,
+      find.textContaining('Blocked in Android settings'),
+    );
+
+    expect(
+      await _scrollForTappableLabel(tester, _settingsRecoveryLabel),
+      isTrue,
+      reason: 'The blocked state must offer a control that opens the system '
+          'notification settings, not only explanatory text.',
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('settings expose a preview of the completion alert', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        settings: const AppSettings(notifications: true),
+        notificationsEnabled: true,
+      ),
+    );
+    await _frames(tester, 6);
+    await _openSettings(tester);
+    await _pumpUntil(tester, find.text('Completion notifications'));
+
+    expect(
+      await _scrollForTappableLabel(tester, _previewAlertLabel),
+      isTrue,
+      reason: 'Settings must expose a control that previews the completion '
+          'alert so a user can verify it without waiting for a timer.',
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -794,9 +1087,10 @@ Widget _app({
   String? focus,
   String? companion,
   LocalDatabase? database,
+  bool notificationsEnabled = false,
 }) {
   _mockBootClock();
-  _mockNotifications();
+  _mockNotifications(enabled: notificationsEnabled);
   final storage = database ?? LocalDatabase(NativeDatabase.memory());
   addTearDown(storage.close);
   return ProviderScope(
