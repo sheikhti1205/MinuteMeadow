@@ -165,21 +165,75 @@ if [ -e "$keystore" ]; then
   fail "The temporary keystore could not be removed."
 fi
 
+# Reprints the verification transcript with certificate subjects removed and
+# digest values masked, so an unexpected apksigner format can be diagnosed
+# from a public log without republishing certificate identity details.
+dump_verification() {
+  printf 'apksigner verification output (digests masked):\n' >&2
+  printf '%s\n' "${certs:-}" |
+    grep -v 'certificate DN:' |
+    sed -e 's/\([0-9A-Fa-f]\{2\}:\)\{8,\}[0-9A-Fa-f]\{2\}/<digest>/g' \
+        -e 's/[0-9A-Fa-f]\{32,\}/<digest>/g' >&2 || true
+}
+
 if ! certs="$("$tools_dir/apksigner" verify --verbose --print-certs "$signed_apk" 2>&1)"; then
-  printf '%s\n' "$certs" >&2
+  dump_verification
   fail "apksigner could not verify the signed release APK."
 fi
 
-signer_count="$(printf '%s\n' "$certs" | sed -n 's/^Signer #\([0-9][0-9]*\).*/\1/p' | sort -u | wc -l)"
-signer_count="$(printf '%s' "$signer_count" | tr -dc '0-9')"
-if [ "$signer_count" != "1" ]; then
-  fail "Expected exactly one signer in ${signed_apk}, found ${signer_count}."
+# apksigner prints a single signer count in verbose mode, then one certificate
+# block per signer. Build-tools 37 labels that block by scheme
+# ("V3.0 Signer: certificate SHA-256 digest: ..."), older build-tools label it
+# by signer ("Signer #1 certificate SHA-256 digest: ..."). Rotation (v3.1),
+# hybrid (v3.2) and source stamp blocks print further certificates and are
+# refused rather than guessed at.
+declared_signers="$(printf '%s\n' "$certs" | sed -n 's/^Number of signers: *\([0-9][0-9]*\) *$/\1/p')"
+declared_count="$(printf '%s\n' "$declared_signers" | grep -c '[0-9]' || true)"
+if [ "$declared_count" != "1" ]; then
+  dump_verification
+  fail "apksigner printed ${declared_count} signer counts instead of one; the verification output is not a format this job can check."
+fi
+if [ "$declared_signers" != "1" ]; then
+  dump_verification
+  fail "The release APK declares ${declared_signers} signers; exactly one is expected."
 fi
 
-actual_cert="$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 .*certificate SHA-256 digest: *//p' | sed -n '1p')"
-actual_cert="$(normalise_sha256 "$actual_cert")"
+digest_lines="$(printf '%s\n' "$certs" | grep -F 'certificate SHA-256 digest:' || true)"
+if [ -z "$digest_lines" ]; then
+  dump_verification
+  fail "apksigner printed no certificate SHA-256 digest for ${signed_apk}."
+fi
+
+eligible_digest=""
+eligible_count=0
+unexpected_cert_line=""
+while IFS= read -r cert_line; do
+  if [ -z "$cert_line" ]; then
+    continue
+  fi
+  case "$cert_line" in
+    "V3.0 Signer: certificate SHA-256 digest: "*|"V2 Signer: certificate SHA-256 digest: "*|"V1 Signer: certificate SHA-256 digest: "*|"Signer #1 certificate SHA-256 digest: "*)
+      eligible_digest="${cert_line#*certificate SHA-256 digest: }"
+      eligible_count=$((eligible_count + 1))
+      ;;
+    *)
+      unexpected_cert_line="$cert_line"
+      ;;
+  esac
+done <<< "$digest_lines"
+
+if [ -n "$unexpected_cert_line" ]; then
+  dump_verification
+  fail "apksigner printed a signer certificate this job does not accept: ${unexpected_cert_line%%certificate SHA-256 digest:*}"
+fi
+if [ "$eligible_count" != "1" ]; then
+  dump_verification
+  fail "apksigner printed ${eligible_count} eligible signer certificates; exactly one is expected."
+fi
+
+actual_cert="$(normalise_sha256 "$eligible_digest")"
 if [ "$actual_cert" != "$expected_cert" ]; then
-  printf '%s\n' "$certs" >&2
+  dump_verification
   fail "The release APK is signed by certificate ${actual_cert}, not the expected ${expected_cert}."
 fi
 
