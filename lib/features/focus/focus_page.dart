@@ -742,10 +742,18 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   }
 
   Widget _buildStandard(BuildContext context, ColorScheme scheme) {
+    final pending = _pendingOutcome != null;
+    final locked = pending || _confirmingCancel;
     return LayoutBuilder(
       builder: (context, constraints) {
         final stage = _buildStage(scheme);
         final stageExtent = _stageExtent(constraints);
+        final padding = EdgeInsets.fromLTRB(
+          20,
+          stage == null ? 20 : 10,
+          20,
+          12,
+        );
         final children = <Widget>[
           if (stage != null) ...[
             Center(
@@ -759,32 +767,76 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
           ],
           ..._standardContent(context, scheme),
         ];
-        return SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(
-            20,
-            stage == null ? 20 : 10,
-            20,
-            20,
-          ),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              minHeight: constraints.maxHeight.isFinite
-                  ? math.max(0.0, constraints.maxHeight - 40)
-                  : 0,
-            ),
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 420),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: children,
+        // Setup and history scroll; the action that starts or advances the
+        // timer keeps a fixed place above the shell navigation, so a compact
+        // phone never has to scroll to reach it.
+        return Column(
+          children: [
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, viewport) => SingleChildScrollView(
+                  padding: padding,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: viewport.maxHeight.isFinite
+                          ? math.max(
+                              0.0,
+                              viewport.maxHeight - padding.vertical,
+                            )
+                          : 0,
+                    ),
+                    child: Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 420),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: children,
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
+            _standardActionBar(scheme, enabled: !locked, pending: pending),
+          ],
         );
       },
+    );
+  }
+
+  Widget _standardActionBar(
+    ColorScheme scheme, {
+    required bool enabled,
+    required bool pending,
+  }) {
+    final theme = Theme.of(context);
+    final secondary = _secondaryAction;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: scheme.outlineVariant)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _primaryButton(_primaryAction, scheme, enabled: enabled),
+                if (secondary != null) ...[
+                  const SizedBox(height: 2),
+                  _secondaryButton(secondary, scheme, enabled: enabled),
+                ],
+                ..._saveNotice(theme, scheme, pending),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -922,8 +974,6 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     final pending = _pendingOutcome != null;
     final locked = pending || _confirmingCancel;
     final theme = Theme.of(context);
-    final primary = _primaryAction;
-    final secondary = _secondaryAction;
     final terminal =
         _engine.status == FocusStatus.completed ||
         _engine.status == FocusStatus.cancelled;
@@ -935,13 +985,6 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
         _statusLine(theme, scheme),
         const SizedBox(height: 12),
         _buildCycleLine(theme, scheme),
-        const SizedBox(height: 24),
-        _primaryButton(primary, scheme, enabled: !locked),
-        if (secondary != null) ...[
-          const SizedBox(height: 4),
-          _secondaryButton(secondary, scheme, enabled: !locked),
-        ],
-        ..._saveNotice(theme, scheme, pending),
       ];
     }
 
@@ -953,7 +996,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
       final showPresets =
           !_engine.hasPlan &&
           !_engine.hasActiveSession &&
-          secondary == null &&
+          _secondaryAction == null &&
           !pending;
       return [
         _statusLine(theme, scheme),
@@ -981,17 +1024,10 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           _buildCycleLine(theme, scheme),
         ],
-        const SizedBox(height: 24),
-        _primaryButton(primary, scheme, enabled: !locked),
-        if (secondary != null) ...[
-          const SizedBox(height: 4),
-          _secondaryButton(secondary, scheme, enabled: !locked),
-        ],
         if (showPresets) ...[
           const SizedBox(height: 16),
           _presetSection(scheme, enabled: !locked),
         ],
-        ..._saveNotice(theme, scheme, pending),
       ];
     }
 
@@ -1016,22 +1052,10 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
             height: 1.4,
           ),
         ),
-        const SizedBox(height: 24),
-        _primaryButton(primary, scheme, enabled: !locked),
-        if (secondary != null) ...[
-          const SizedBox(height: 4),
-          _secondaryButton(secondary, scheme, enabled: !locked),
-        ],
-        ..._saveNotice(theme, scheme, pending),
       ];
     }
 
-    return _setupContent(
-      context,
-      scheme,
-      locked: locked,
-      primary: primary,
-    );
+    return _setupContent(context, scheme, locked: locked);
   }
 
   Widget _statusLine(ThemeData theme, ColorScheme scheme) {
@@ -1049,9 +1073,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     BuildContext context,
     ColorScheme scheme, {
     required bool locked,
-    required ({String label, IconData icon, VoidCallback onPressed}) primary,
   }) {
-    final theme = Theme.of(context);
     final settings = _activeSettings;
     return [
       _buildSetupTime(context, scheme),
@@ -1069,9 +1091,6 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
         const SizedBox(height: 2),
         _configureTimersAction(scheme),
       ],
-      const SizedBox(height: 12),
-      _primaryButton(primary, scheme, enabled: !locked),
-      ..._saveNotice(theme, scheme, _pendingOutcome != null),
     ];
   }
 

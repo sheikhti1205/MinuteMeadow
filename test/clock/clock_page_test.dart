@@ -60,6 +60,62 @@ Future<void> _enterDuration(
   await tester.enterText(find.byKey(ClockPage.secondsFieldKey), seconds);
 }
 
+/// A five second running countdown with a paused two second stopwatch, saved
+/// by a process that then died for ten minutes, plus the wall time a new
+/// process sees after the gap.
+({String snapshot, DateTime wall}) _countdownExpiredWhileDead() {
+  final clock = FakeMonotonicClock();
+  var wall = DateTime.utc(2026, 1, 1, 12);
+  final original = ClockEngine(
+    nowMicroseconds: clock.now,
+    processToken: 'previous-process',
+    wallClock: () => wall,
+  );
+  original.setCountdownDuration(const Duration(seconds: 5));
+  original.start();
+  original
+    ..setMode(ClockMode.stopwatch)
+    ..start();
+  clock.advance(const Duration(seconds: 2));
+  wall = wall.add(const Duration(seconds: 2));
+  original
+    ..pause()
+    ..setMode(ClockMode.countdown);
+  final snapshot = original.snapshot();
+
+  clock.advance(const Duration(minutes: 10));
+  wall = wall.add(const Duration(minutes: 10));
+  return (snapshot: snapshot, wall: wall);
+}
+
+/// Mounts a page from a stored snapshot, as a cold start does.
+Future<void> _pumpRestored(
+  WidgetTester tester, {
+  required String snapshot,
+  required DateTime recoveryNow,
+  required DateTime Function() wallClock,
+  required List<String> saved,
+  required List<DateTime?> deadlines,
+  int Function()? monotonicNow,
+  VoidCallback? onCountdownCompleted,
+}) {
+  return tester.pumpWidget(
+    MaterialApp(
+      theme: CompanionTheme.light,
+      home: ClockPage(
+        initialSnapshot: snapshot,
+        recoveryNow: recoveryNow,
+        wallClock: wallClock,
+        monotonicNow: monotonicNow,
+        onSnapshot: (String value) async => saved.add(value),
+        onCountdownDeadlineChanged: (DateTime? value) async =>
+            deadlines.add(value),
+        onCountdownCompleted: onCountdownCompleted,
+      ),
+    ),
+  );
+}
+
 void main() {
   testWidgets('shows one dominant stopwatch display and a start action', (
     tester,
@@ -583,6 +639,209 @@ void main() {
       deadlines.single!.isAfter(wall.add(const Duration(minutes: 7))),
       isTrue,
     );
+
+    await _dispose(tester);
+  });
+
+  testWidgets('a cold start past the deadline shows Complete without an alarm', (
+    tester,
+  ) async {
+    final expired = _countdownExpiredWhileDead();
+    final clock = FakeMonotonicClock();
+    final saved = <String>[];
+    final deadlines = <DateTime?>[];
+    var completions = 0;
+
+    await _pumpRestored(
+      tester,
+      snapshot: expired.snapshot,
+      recoveryNow: expired.wall,
+      wallClock: () => expired.wall,
+      monotonicNow: clock.now,
+      saved: saved,
+      deadlines: deadlines,
+      onCountdownCompleted: () => completions++,
+    );
+
+    expect(tester.widget<Text>(find.byKey(ClockPage.timeKey)).data, '00:00');
+    expect(find.text('of 00:05'), findsOneWidget);
+    expect(find.text('Complete'), findsOneWidget);
+    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('Pause'), findsNothing);
+    // The stopwatch keeps its own paused time behind the finished countdown.
+    expect(find.text('Stopwatch 00:02.0'), findsOneWidget);
+    expect(
+      tester.widget<IconButton>(find.byKey(ClockPage.repeatActionKey)).onPressed,
+      isNotNull,
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(ClockPage.resetActionKey)).onPressed,
+      isNotNull,
+    );
+
+    // A countdown that expired while dead must not reschedule or cancel a
+    // matured alarm, and must not replay completion feedback.
+    expect(deadlines, isEmpty);
+    expect(completions, 0);
+
+    // The first write settles the countdown so a later launch cannot bridge
+    // the dead gap again.
+    expect(saved, hasLength(1));
+    final settled = ClockEngine(
+      nowMicroseconds: () => 0,
+      initialSnapshot: saved.single,
+    );
+    expect(settled.isCountdownRunning, isFalse);
+    expect(settled.isCountdownComplete, isTrue);
+    expect(settled.countdownDuration, const Duration(seconds: 5));
+    expect(settled.remaining, Duration.zero);
+
+    await _dispose(tester);
+  });
+
+  testWidgets('Repeat after a restored completion restarts the saved duration', (
+    tester,
+  ) async {
+    final expired = _countdownExpiredWhileDead();
+    final clock = FakeMonotonicClock();
+    final saved = <String>[];
+    final deadlines = <DateTime?>[];
+
+    await _pumpRestored(
+      tester,
+      snapshot: expired.snapshot,
+      recoveryNow: expired.wall,
+      wallClock: () => expired.wall,
+      monotonicNow: clock.now,
+      saved: saved,
+      deadlines: deadlines,
+    );
+    expect(find.text('Complete'), findsOneWidget);
+    expect(deadlines, isEmpty);
+
+    await tester.tap(find.byKey(ClockPage.repeatActionKey));
+    await tester.pump();
+
+    expect(tester.widget<Text>(find.byKey(ClockPage.timeKey)).data, '00:05');
+    expect(find.text('of 00:05'), findsOneWidget);
+    expect(find.text('Complete'), findsNothing);
+    expect(find.text('Pause'), findsOneWidget);
+    expect(deadlines.single, expired.wall.add(const Duration(seconds: 5)));
+
+    await _dispose(tester);
+  });
+
+  testWidgets(
+    'a cold start in stopwatch mode keeps its time, laps and finished countdown',
+    (tester) async {
+      final clock = FakeMonotonicClock();
+      var wall = DateTime.utc(2026, 1, 1, 12);
+      final original = ClockEngine(
+        nowMicroseconds: clock.now,
+        processToken: 'previous-process',
+        wallClock: () => wall,
+      );
+      original.setCountdownDuration(const Duration(seconds: 5));
+      original.start();
+      original
+        ..setMode(ClockMode.stopwatch)
+        ..start();
+      clock.advance(const Duration(seconds: 3));
+      wall = wall.add(const Duration(seconds: 3));
+      original.addLap();
+      original.pause();
+      final snapshot = original.snapshot();
+
+      clock.advance(const Duration(minutes: 10));
+      wall = wall.add(const Duration(minutes: 10));
+
+      final saved = <String>[];
+      final deadlines = <DateTime?>[];
+      await _pumpRestored(
+        tester,
+        snapshot: snapshot,
+        recoveryNow: wall,
+        wallClock: () => wall,
+        monotonicNow: clock.now,
+        saved: saved,
+        deadlines: deadlines,
+      );
+
+      expect(tester.widget<Text>(find.byKey(ClockPage.timeKey)).data, '00:03.0');
+      expect(find.text('Resume'), findsOneWidget);
+      expect(find.text('Lap 1'), findsOneWidget);
+      expect(find.text('Countdown 00:00'), findsOneWidget);
+      expect(find.text('Complete'), findsNothing);
+      expect(deadlines, isEmpty);
+
+      await tester.tap(find.byKey(ClockPage.hiddenCountdownKey));
+      await tester.pump();
+
+      expect(find.text('Complete'), findsOneWidget);
+      expect(find.text('of 00:05'), findsOneWidget);
+      expect(find.text('Stopwatch 00:03.0'), findsOneWidget);
+      expect(deadlines, isEmpty);
+
+      await _dispose(tester);
+    },
+  );
+
+  testWidgets('reopening a settled countdown stays Complete and silent', (
+    tester,
+  ) async {
+    final expired = _countdownExpiredWhileDead();
+    final clock = FakeMonotonicClock();
+    final saved = <String>[];
+    final firstDeadlines = <DateTime?>[];
+
+    await _pumpRestored(
+      tester,
+      snapshot: expired.snapshot,
+      recoveryNow: expired.wall,
+      wallClock: () => expired.wall,
+      monotonicNow: clock.now,
+      saved: saved,
+      deadlines: firstDeadlines,
+    );
+    expect(find.text('Complete'), findsOneWidget);
+    expect(firstDeadlines, isEmpty);
+    expect(saved, hasLength(1));
+    final settledSnapshot = saved.single;
+    await _dispose(tester);
+
+    final reopenWall = expired.wall.add(const Duration(hours: 1));
+    final reopenSaved = <String>[];
+    final deadlines = <DateTime?>[];
+    var completions = 0;
+    await _pumpRestored(
+      tester,
+      snapshot: settledSnapshot,
+      recoveryNow: reopenWall,
+      wallClock: () => reopenWall,
+      monotonicNow: clock.now,
+      saved: reopenSaved,
+      deadlines: deadlines,
+      onCountdownCompleted: () => completions++,
+    );
+
+    expect(tester.widget<Text>(find.byKey(ClockPage.timeKey)).data, '00:00');
+    expect(find.text('of 00:05'), findsOneWidget);
+    expect(find.text('Complete'), findsOneWidget);
+    // The retained stopwatch is unchanged by the second launch.
+    expect(find.text('Stopwatch 00:02.0'), findsOneWidget);
+    expect(deadlines, isEmpty);
+    expect(completions, 0);
+
+    // The second launch persists the same settled elapsed, so the finished
+    // countdown cannot grow a hidden dimension from reopening.
+    expect(reopenSaved, hasLength(1));
+    final reopened = ClockEngine(
+      nowMicroseconds: () => 0,
+      initialSnapshot: reopenSaved.single,
+    );
+    expect(reopened.isCountdownRunning, isFalse);
+    expect(reopened.countdownElapsed, const Duration(seconds: 5));
+    expect(reopened.countdownDuration, const Duration(seconds: 5));
 
     await _dispose(tester);
   });

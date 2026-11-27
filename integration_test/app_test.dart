@@ -87,6 +87,13 @@ void main() {
     await tester.pageBack();
     await _pumpFrames(tester);
     final primary = find.byKey(FocusPage.primaryActionKey);
+    // The action stays above the shell navigation, so a compact 320 x 640
+    // device reaches it without scrolling.
+    final page = tester.getRect(find.byType(FocusPage));
+    final action = tester.getRect(primary);
+    expect(action.top, greaterThanOrEqualTo(page.top));
+    expect(action.bottom, lessThanOrEqualTo(page.bottom));
+    expect(primary.hitTestable(), findsOneWidget);
     await tester.tap(primary);
     await _pumpFrames(tester);
     expect(find.descendant(of: primary, matching: find.text('Pause')), findsOneWidget);

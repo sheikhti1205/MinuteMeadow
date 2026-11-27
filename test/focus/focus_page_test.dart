@@ -832,6 +832,74 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('keeps the timer action reachable at 320 x 640 under the shell', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final settings = ValueNotifier(const FocusSettings());
+    final events = <bool>[];
+    addTearDown(settings.dispose);
+
+    // The shell leaves the page 320 x 640 minus its header and navigation,
+    // which is where the action used to sit below the fold.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: CompanionTheme.light,
+        home: Scaffold(
+          appBar: AppBar(title: const Text('MinuteMeadow')),
+          body: FocusPage(
+            settings: settings,
+            initialSnapshot: null,
+            onOutcome: (outcome, snapshot) async {},
+            onSnapshot: (snapshot) async {},
+            onImmersiveChanged: events.add,
+            onConfigureTimers: () {},
+          ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: 0,
+            onDestinationSelected: (_) {},
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.hourglass_empty),
+                label: 'Focus',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.schedule_outlined),
+                label: 'Clock',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final action = find.byKey(FocusPage.primaryActionKey);
+    final page = tester.getRect(find.byType(FocusPage));
+    final actionRect = tester.getRect(action);
+    expect(actionRect.top, greaterThanOrEqualTo(page.top));
+    expect(actionRect.bottom, lessThanOrEqualTo(page.bottom));
+    expect(action.hitTestable(), findsOneWidget);
+
+    // Setup and history scroll above the bar; the action itself stays put.
+    final time = find.byKey(FocusPage.timeKey);
+    final timeRect = tester.getRect(time);
+    await tester.dragFrom(tester.getCenter(time), const Offset(0, -120));
+    await tester.pump();
+    expect(tester.getRect(time).top, lessThan(timeRect.top));
+    expect(tester.getRect(action), actionRect);
+
+    await tester.tap(action);
+    await tester.pump();
+    expect(events, [false, true]);
+    expect(find.byKey(FocusPage.slideToQuitKey), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('disabled slide ignores drags until re-enabled', (tester) async {
     var calls = 0;
     Widget build({required bool enabled}) => MaterialApp(
