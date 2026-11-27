@@ -179,19 +179,24 @@ void main() {
   ) async {
     _useTallPhone(tester);
     final semantics = tester.ensureSemantics();
-    addTearDown(semantics.dispose);
-    await tester.pumpWidget(_host(sessions: _sessions()));
-    await tester.pump();
-    await _revealText(tester, 'Leaderboard');
+    try {
+      await tester.pumpWidget(_host(sessions: _sessions()));
+      await tester.pump();
+      await _revealText(tester, 'Leaderboard');
 
-    expect(
-      find.bySemanticsLabel(
-        RegExp(r'Leaderboard[\s\S]*Coming soon|Coming soon[\s\S]*Leaderboard'),
-      ),
-      findsOneWidget,
-    );
+      expect(
+        find.bySemanticsLabel(
+          RegExp(
+            r'Leaderboard[\s\S]*Coming soon|Coming soon[\s\S]*Leaderboard',
+          ),
+        ),
+        findsOneWidget,
+      );
 
-    await _dispose(tester);
+      await _dispose(tester);
+    } finally {
+      semantics.dispose();
+    }
   });
 
   testWidgets('Leaderboard coming soon is informational, not an action', (
