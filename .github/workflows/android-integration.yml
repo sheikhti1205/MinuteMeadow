@@ -43,4 +43,4 @@ jobs:
           arch: x86_64
           target: google_apis
           disable-animations: true
-          script: flutter test integration_test -d emulator-5554
+          script: bash tool/run_android_integration.sh
