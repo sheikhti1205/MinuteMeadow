@@ -162,6 +162,8 @@ class _InsightsPageState extends State<InsightsPage>
             days: summary.lastSevenDays,
             totals: summary.lastSevenDaysTotals,
           ),
+          const SizedBox(height: 12),
+          const _LeaderboardTeaser(),
           const SizedBox(height: 24),
           _RecentHeader(onSeeAll: _openHistory),
           const SizedBox(height: 8),
@@ -1149,6 +1151,98 @@ class _FirstRunEmptyState extends StatelessWidget {
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: colors.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 20),
+              const _LeaderboardTeaser(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Marks the leaderboard as planned without offering anything to operate.
+class _LeaderboardTeaser extends StatelessWidget {
+  const _LeaderboardTeaser();
+
+  static const _description =
+      'Compare focus time with others once it is available.';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Card.outlined(
+      margin: EdgeInsets.zero,
+      child: Semantics(
+        container: true,
+        label: 'Leaderboard. Coming soon. $_description',
+        excludeSemantics: true,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: colors.primaryContainer,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.leaderboard_outlined,
+                  size: 18,
+                  color: colors.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          'Leaderboard',
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: colors.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            'Coming soon',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: colors.onSurfaceVariant,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _description,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
