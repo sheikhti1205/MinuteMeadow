@@ -142,11 +142,13 @@ void main() {
     tester,
   ) async {
     final settings = ValueNotifier(const FocusSettings());
+    final clock = _PageClock();
     addTearDown(settings.dispose);
 
     await tester.pumpWidget(
       _host(
         settings: settings,
+        clock: clock,
         appearance: const AppearancePreferences(
           cardStyle: FocusCardStyle.outlined,
           cardEffect: FocusCardEffect.rain,
@@ -164,7 +166,19 @@ void main() {
     );
     expect(surface.isBreak, isFalse);
     expect(surface.running, isTrue);
+    // The injected clock keeps the fraction exact; a real clock would report
+    // the few microseconds the test itself spent starting the session.
     expect(surface.progress, 0);
+
+    clock.advance(const Duration(minutes: 5));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    final advanced = tester.widget<FocusCardSurface>(
+      find.byKey(FocusPage.cardSurfaceKey),
+    );
+    expect(advanced.progress, 0.2);
+    expect(advanced.isBreak, isFalse);
+    expect(advanced.running, isTrue);
     expect(find.byKey(FocusPage.slideToQuitKey), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());

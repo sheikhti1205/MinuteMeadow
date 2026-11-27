@@ -59,6 +59,7 @@ Widget _largeTextHost({
   required Future<void> Function(FocusOutcome outcome, String snapshot) onOutcome,
   required Future<void> Function(String snapshot) onSnapshot,
   ValueChanged<bool>? onImmersiveChanged,
+  VoidCallback? onConfigureTimers,
 }) => MaterialApp(
   theme: CompanionTheme.light,
   builder: (context, child) => MediaQuery(
@@ -74,6 +75,7 @@ Widget _largeTextHost({
       initialSnapshot: null,
       onSnapshot: onSnapshot,
       onImmersiveChanged: onImmersiveChanged,
+      onConfigureTimers: onConfigureTimers,
       companionStageBuilder: (context) => const SizedBox.expand(),
     ),
   ),
@@ -263,9 +265,24 @@ void main() {
       expect(data.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
       expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
 
+      // The setup content scrolls above the pinned action bar. At this surface
+      // the link is the last row and sits below the fold, so reveal it the way
+      // a person must before tapping. The pinned Start must not move or
+      // intercept the target.
+      final primary = find.byKey(FocusPage.primaryActionKey);
+      final primaryRect = tester.getRect(primary);
+      await tester.ensureVisible(action);
+      await tester.pump();
+      expect(action.hitTestable(), findsOneWidget);
+      expect(
+        tester.getRect(action).bottom,
+        lessThanOrEqualTo(tester.getRect(primary).top),
+      );
+
       await tester.tap(action);
       await tester.pump();
       expect(configured, 1);
+      expect(tester.getRect(primary), primaryRect);
 
       await _start(tester);
       expect(find.byKey(FocusPage.configureTimersKey), findsNothing);
@@ -825,6 +842,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final settings = ValueNotifier(const FocusSettings());
     final events = <bool>[];
+    var configured = 0;
     addTearDown(settings.dispose);
 
     await tester.pumpWidget(
@@ -833,6 +851,7 @@ void main() {
         onOutcome: (outcome, snapshot) async {},
         onSnapshot: (snapshot) async {},
         onImmersiveChanged: events.add,
+        onConfigureTimers: () => configured += 1,
       ),
     );
     await tester.pump();
@@ -840,9 +859,27 @@ void main() {
     expect(find.byKey(FocusPage.stageKey), findsOneWidget);
     expect(find.byKey(FocusPage.timeKey), findsOneWidget);
 
-    await tester.ensureVisible(find.byKey(FocusPage.primaryActionKey));
+    // Double text at 320 wide stacks the setup content well past the fold.
+    // The settings link must still be reachable through the scroll area, and
+    // the pinned Start must stay fixed above the fold.
+    final primary = find.byKey(FocusPage.primaryActionKey);
+    final primaryRect = tester.getRect(primary);
+    final configure = find.byKey(FocusPage.configureTimersKey);
+    await tester.ensureVisible(configure);
     await tester.pump();
-    await tester.tap(find.byKey(FocusPage.primaryActionKey));
+    expect(configure.hitTestable(), findsOneWidget);
+    expect(
+      tester.getRect(configure).bottom,
+      lessThanOrEqualTo(tester.getRect(primary).top),
+    );
+    await tester.tap(configure);
+    await tester.pump();
+    expect(configured, 1);
+    expect(tester.getRect(primary), primaryRect);
+
+    await tester.ensureVisible(primary);
+    await tester.pump();
+    await tester.tap(primary);
     await tester.pump();
     expect(tester.takeException(), isNull);
     expect(events, [false, true]);
@@ -863,6 +900,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final settings = ValueNotifier(const FocusSettings());
     final events = <bool>[];
+    var configured = 0;
     addTearDown(settings.dispose);
 
     // The shell leaves the page 320 x 640 minus its header and navigation,
@@ -878,7 +916,7 @@ void main() {
             onOutcome: (outcome, snapshot) async {},
             onSnapshot: (snapshot) async {},
             onImmersiveChanged: events.add,
-            onConfigureTimers: () {},
+            onConfigureTimers: () => configured += 1,
           ),
           bottomNavigationBar: NavigationBar(
             selectedIndex: 0,
@@ -913,6 +951,21 @@ void main() {
     await tester.dragFrom(tester.getCenter(time), const Offset(0, -120));
     await tester.pump();
     expect(tester.getRect(time).top, lessThan(timeRect.top));
+    expect(tester.getRect(action), actionRect);
+
+    // The settings link shares that scroll content. After a real scroll it is
+    // fully clear of the pinned bar and tappable, and Start has not moved.
+    final configure = find.byKey(FocusPage.configureTimersKey);
+    await tester.ensureVisible(configure);
+    await tester.pump();
+    expect(configure.hitTestable(), findsOneWidget);
+    expect(
+      tester.getRect(configure).bottom,
+      lessThanOrEqualTo(tester.getRect(action).top),
+    );
+    await tester.tap(configure);
+    await tester.pump();
+    expect(configured, 1);
     expect(tester.getRect(action), actionRect);
 
     await tester.tap(action);

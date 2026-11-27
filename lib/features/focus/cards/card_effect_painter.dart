@@ -195,6 +195,7 @@ class CardEffectPainter extends CustomPainter {
               ink.withValues(alpha: 0.16 * motion),
               ink.withValues(alpha: 0),
             ],
+            <double>[0.0, 0.5, 1.0],
           )
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1

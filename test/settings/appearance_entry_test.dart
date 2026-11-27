@@ -111,7 +111,18 @@ Future<void> _openEntry(WidgetTester tester, Finder entry) async {
   expect(entry, findsOneWidget);
   await tester.tap(entry);
   await tester.pump();
-  await tester.pump(const Duration(milliseconds: 400));
+  // A push keeps the settings route onstage until the entering route's
+  // transition finishes and its overlay turns opaque. Advance bounded frames
+  // until the handover lands, so the editor is the only surface the finders
+  // can see. This waits for the route; the assertions below still verify the
+  // destination itself rather than the shell's absence.
+  for (var frame = 0; frame < 12; frame++) {
+    if (find.byType(SettingsPage, skipOffstage: true).evaluate().isEmpty) {
+      break;
+    }
+    await tester.pump(const Duration(milliseconds: 200));
+  }
+  await tester.pump();
 }
 
 /// Layout order of the settings list, so an entry's group is not guessed from
@@ -273,7 +284,10 @@ void main() {
     final harness = await _pump(tester);
     await _openEntry(tester, _themeEntry());
 
-    expect(find.byType(SettingsPage), findsNothing);
+    // The editor is its own page: assert the destination the user landed on.
+    // The shell route can stay mounted for the first frames of the push, so
+    // its absence is not what proves the editor is open.
+    expect(find.widgetWithText(AppBar, 'Theme & Colors'), findsOneWidget);
     expect(_backControl(), findsWidgets);
 
     for (final mode in ['System', 'Light', 'Dark']) {
@@ -334,7 +348,7 @@ void main() {
     await _pump(tester);
     await _openEntry(tester, _homeEntry());
 
-    expect(find.byType(SettingsPage), findsNothing);
+    expect(find.widgetWithText(AppBar, 'Home & Cards'), findsOneWidget);
     expect(_backControl(), findsWidgets);
 
     for (final (name, pattern) in [

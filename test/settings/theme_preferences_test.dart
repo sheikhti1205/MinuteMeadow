@@ -75,6 +75,20 @@ Future<void> _apply(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// Scrolls the editor's list until [finder] is built and visible.
+///
+/// The editor is a lazy [ListView]: rows below the first screen have no
+/// elements until they scroll into range, so the tests reveal them with a real
+/// scroll instead of assuming the whole form is already built.
+Future<void> _reveal(WidgetTester tester, Finder finder) async {
+  await tester.scrollUntilVisible(
+    finder,
+    128,
+    scrollable: find.byType(Scrollable),
+  );
+  await tester.pumpAndSettle();
+}
+
 void main() {
   group('watch dial', () {
     test('defaults off and persists additively', () {
@@ -235,10 +249,9 @@ void main() {
     ) async {
       final saves = await _openEditor(tester, settings: const AppSettings());
 
-      expect(
-        find.text(ThemeColorsPage.systemSeedUnavailableMessage),
-        findsOneWidget,
-      );
+      final message = find.text(ThemeColorsPage.systemSeedUnavailableMessage);
+      await _reveal(tester, message);
+      expect(message, findsOneWidget);
       final system = tester.widget<ChoiceChip>(
         find.byKey(ThemeColorsPage.paletteChoiceKey(AppPalette.system)),
       );
@@ -261,15 +274,14 @@ void main() {
         systemSeed: const Color(0xFF3F6F87),
       );
 
+      final system = find.byKey(
+        ThemeColorsPage.paletteChoiceKey(AppPalette.system),
+      );
+      await _reveal(tester, system);
       expect(
         find.text(ThemeColorsPage.systemSeedUnavailableMessage),
         findsNothing,
       );
-      final system = find.byKey(
-        ThemeColorsPage.paletteChoiceKey(AppPalette.system),
-      );
-      await tester.ensureVisible(system);
-      await tester.pump();
       expect(tester.widget<ChoiceChip>(system).onSelected, isNotNull);
 
       await tester.tap(system);

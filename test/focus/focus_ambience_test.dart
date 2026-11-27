@@ -394,14 +394,10 @@ void main() {
   });
 
   group('page', () {
-    setUp(() {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    });
-
-    tearDown(() {
-      debugDefaultTargetPlatformOverride = null;
-    });
-
+    // The page's own androidOnly switch selects the Android surface. A
+    // debugDefaultTargetPlatformOverride set in setUp/tearDown would still be
+    // set when the binding verifies its foundation invariants at the end of
+    // each test body, which fails the test.
     testWidgets('lists Off, Rain and Volume and saves each choice', (
       tester,
     ) async {
@@ -411,6 +407,7 @@ void main() {
         MaterialApp(
           theme: CompanionTheme.light,
           home: FocusAmbiencePage(
+            androidOnly: true,
             preferences: const FocusAmbiencePreferences(),
             onSave: (next) async => saves.add(next),
           ),
@@ -435,6 +432,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(saves.last.volume, greaterThan(0.3));
       expect(tester.takeException(), isNull);
+
+      // Disposing inside the body proves the editor leaves no pending work.
+      await tester.pumpWidget(const SizedBox.shrink());
     });
 
     testWidgets('returns to the saved value when a save fails', (
@@ -446,6 +446,7 @@ void main() {
         MaterialApp(
           theme: CompanionTheme.light,
           home: FocusAmbiencePage(
+            androidOnly: true,
             preferences: const FocusAmbiencePreferences(),
             onSave: (next) async {
               if (fail) throw StateError('No storage.');
@@ -468,6 +469,8 @@ void main() {
       );
       expect(rain.selected, isFalse);
       expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
     });
   });
 }
