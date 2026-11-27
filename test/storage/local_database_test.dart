@@ -146,7 +146,7 @@ void main() {
     final version = await database
         .customSelect('PRAGMA user_version')
         .getSingle();
-    expect(version.read<int>('user_version'), 2);
+    expect(version.read<int>('user_version'), 3);
 
     final columns = await database
         .customSelect('PRAGMA table_info(focus_sessions)')

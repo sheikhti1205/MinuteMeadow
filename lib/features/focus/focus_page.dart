@@ -5,7 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/time/timer_defaults.dart';
+import '../../design/appearance_preferences.dart';
+import '../../design/watch_timer_dial.dart';
+import 'background/wallpapers.dart';
+import 'cards/cards.dart';
 import 'focus_engine.dart';
+import 'focus_plan_preview.dart';
 import 'focus_stage.dart';
 import 'slide_to_quit.dart';
 
@@ -31,6 +36,12 @@ class FocusPage extends StatefulWidget {
     this.companionStageBuilder,
     this.onImmersiveChanged,
     this.onConfigureTimers,
+    this.onRecoveredOutcome,
+    this.appearance = const AppearancePreferences(),
+    this.lowPower = false,
+    this.reducedMotion,
+    this.wallpaperSelection = const NoWallpaperSelection(),
+    this.wallpaperLocation = WallpaperLocation.both,
     super.key,
   });
 
@@ -68,6 +79,36 @@ class FocusPage extends StatefulWidget {
   /// stays on this page; when null the quiet settings link is not shown.
   final VoidCallback? onConfigureTimers;
 
+  /// Delivers a session that had already finished while the app was closed.
+  ///
+  /// Cold-start repair is silent: the host can store the same record without
+  /// raising a completion alert for a session the user never watched finish.
+  /// When null, recovered outcomes fall back to [onOutcome], so older hosts and
+  /// tests keep working. Live outcomes always use [onOutcome].
+  final Future<void> Function(FocusOutcome outcome, String snapshot)?
+  onRecoveredOutcome;
+
+  /// The saved Focus home layout, card style and ambient effect. The defaults
+  /// (classic, filled, off) keep the original composition with no card.
+  final AppearancePreferences appearance;
+
+  /// Keeps the card effect on a still frame when the device asks to save power.
+  final bool lowPower;
+
+  /// Overrides the platform reduce-motion preference for the card effect. When
+  /// null the platform setting decides.
+  final bool? reducedMotion;
+
+  /// The saved wallpaper source. [NoWallpaperSelection] keeps the page's
+  /// original opaque surface; a live type or validated photo mounts the shared
+  /// backdrop behind the live UI.
+  final WallpaperSelection wallpaperSelection;
+
+  /// Where the saved wallpaper may appear, from the same editor choice that the
+  /// settings surface stores.
+  final WallpaperLocation wallpaperLocation;
+
+  static const wallpaperKey = Key('focus-wallpaper');
   static const timeKey = Key('focus-time');
   static const timeSemanticsKey = Key('focus-time-semantics');
   static const primaryActionKey = Key('focus-primary-action');
@@ -99,6 +140,13 @@ class FocusPage extends StatefulWidget {
   static const shortBreakFieldKey = Key('focus-editor-short');
   static const longBreakFieldKey = Key('focus-editor-long');
   static const sessionsFieldKey = Key('focus-editor-sessions');
+  static const runNameFieldKey = Key('focus-run-name');
+  static const planPreviewKey = Key('focus-plan-preview');
+  static const timelineKey = Key('focus-plan-timeline');
+  static const cardSurfaceKey = Key('focus-card-surface');
+  static const refinedRingKey = Key('focus-refined-ring');
+  static const studioDialKey = Key('focus-studio-dial');
+  static const watchDialKey = Key('focus-watch-dial');
 
   @override
   State<FocusPage> createState() => _FocusPageState();
@@ -122,11 +170,20 @@ class _PresetNameResult {
 
 enum _PresetMenuAction { edit, rename, duplicate, makeDefault, delete }
 
+typedef _PendingOutcome = ({
+  FocusOutcome outcome,
+  String snapshot,
+  bool autoAdvance,
+  bool recovered,
+});
+
 class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   late final FocusEngine _engine;
+  late final TextEditingController _name;
   late FocusPlanState _plan;
   Timer? _ticker;
-  ({FocusOutcome outcome, String snapshot, bool autoAdvance})? _pendingOutcome;
+  Timer? _previewTicker;
+  _PendingOutcome? _pendingOutcome;
   bool _savingOutcome = false;
   bool _snapshotFailed = false;
   bool _confirmingCancel = false;
@@ -166,14 +223,32 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
       restored: saved,
       recoveredAt: widget.recoveryNow,
     )..prepare();
+    _name = TextEditingController(text: _engine.label ?? '');
     widget.settings.addListener(_handleSettingsChanged);
     WidgetsBinding.instance.addObserver(this);
 
     final overdue = _engine.tick();
     if (overdue != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          unawaited(_finish(overdue, allowAutoAdvance: false));
+      // A session that finished while the app was closed is marked pending
+      // before the first frame, so it is delivered exactly once and never
+      // persisted as if it were still active. It keeps its own callback.
+      _pendingOutcome = (
+        outcome: overdue,
+        snapshot: _snapshot(),
+        autoAdvance: false,
+        recovered: true,
+      );
+      _savingOutcome = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        final pending = _pendingOutcome;
+        if (pending == null) return;
+        try {
+          await _deliverOutcome(pending);
+        } catch (_) {
+          // The terminal save notice keeps Retry available for this outcome.
+        } finally {
+          if (mounted) setState(() => _savingOutcome = false);
         }
       });
     }
@@ -201,6 +276,8 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _ticker?.cancel();
+    _previewTicker?.cancel();
+    _name.dispose();
     widget.settings.removeListener(_handleSettingsChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -242,7 +319,16 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
         _engine.planFinished) {
       return;
     }
-    setState(_engine.startFocus);
+    // A cancelled run keeps its label only for its own record; the next run
+    // starts from the setup field, which is hidden while the result is shown.
+    final clearLabel = _engine.status == FocusStatus.cancelled;
+    setState(() {
+      _engine.startFocus();
+      if (clearLabel) {
+        _engine.rename(null);
+        _name.clear();
+      }
+    });
     _afterChange();
   }
 
@@ -268,6 +354,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   void _endPlan() {
     if (!_engine.hasPlan || _engine.hasActiveSession) return;
     final next = _plan.clearOneOff();
+    _name.clear();
     setState(() {
       _plan = next;
       _engine.endPlan();
@@ -308,12 +395,35 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     } else {
       _stopTicker();
     }
+    _syncPreviewTicker();
   }
 
   void _stopTicker() {
     _ticker?.cancel();
     _ticker = null;
   }
+
+  /// The setup estimate names a wall-clock finish time, so it needs a rebuild
+  /// even while no timer is running. A slow tick is enough for a minute-
+  /// granularity label and stops as soon as the estimate leaves the screen.
+  void _syncPreviewTicker() {
+    if (_showsPlanPreview) {
+      _previewTicker ??= Timer.periodic(
+        const Duration(seconds: 30),
+        (_) {
+          if (mounted) setState(() {});
+        },
+      );
+    } else {
+      _previewTicker?.cancel();
+      _previewTicker = null;
+    }
+  }
+
+  bool get _showsPlanPreview =>
+      !_engine.hasActiveSession &&
+      _engine.status != FocusStatus.completed &&
+      _engine.status != FocusStatus.cancelled;
 
   void _tick() {
     final outcome = _engine.tick();
@@ -334,6 +444,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
         outcome: outcome,
         snapshot: _snapshot(),
         autoAdvance: allowAutoAdvance,
+        recovered: false,
       );
     });
     _syncTicker();
@@ -341,30 +452,42 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     await _saveOutcome();
   }
 
+  /// Delivers [pending] once through the callback that owns that outcome.
+  ///
+  /// Cold-start recovery can choose a silent host callback; live outcomes keep
+  /// [FocusPage.onOutcome]. The pending record stays until the write succeeds,
+  /// so Retry repeats exactly one atomic record-and-persist transaction.
+  Future<void> _deliverOutcome(_PendingOutcome pending) async {
+    final deliver = pending.recovered
+        ? (widget.onRecoveredOutcome ?? widget.onOutcome)
+        : widget.onOutcome;
+    await deliver(pending.outcome, pending.snapshot);
+    if (!mounted) return;
+    setState(() {
+      _pendingOutcome = null;
+      _snapshotFailed = false;
+    });
+    if (pending.autoAdvance &&
+        pending.outcome.completed &&
+        _plan.autoAdvance &&
+        _engine.status == FocusStatus.completed) {
+      // One opt-in transition, after the outcome has been stored, so a
+      // restart or a failed write can never lose the completed session. The
+      // final break never starts another plan.
+      if (_engine.phase == FocusPhase.focus) {
+        _startBreak();
+      } else if (!_engine.planFinished) {
+        _startFocus();
+      }
+    }
+  }
+
   Future<void> _saveOutcome() async {
     final pending = _pendingOutcome;
     if (pending == null || _savingOutcome) return;
     setState(() => _savingOutcome = true);
     try {
-      await widget.onOutcome(pending.outcome, pending.snapshot);
-      if (!mounted) return;
-      setState(() {
-        _pendingOutcome = null;
-        _snapshotFailed = false;
-      });
-      if (pending.autoAdvance &&
-          pending.outcome.completed &&
-          _plan.autoAdvance &&
-          _engine.status == FocusStatus.completed) {
-        // One opt-in transition, after the outcome has been stored, so a
-        // restart or a failed write can never lose the completed session. The
-        // final break never starts another plan.
-        if (_engine.phase == FocusPhase.focus) {
-          _startBreak();
-        } else if (!_engine.planFinished) {
-          _startFocus();
-        }
-      }
+      await _deliverOutcome(pending);
     } catch (_) {
       // Keep the terminal snapshot and offer to retry before starting another
       // session. Auto-advance waits for a successful write.
@@ -727,16 +850,48 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
 
   int get _cycleDone => _engine.planCompleted;
 
+  /// True when the host configured a live wallpaper or a validated photo.
+  ///
+  /// A selection with no source keeps the original opaque page surface and the
+  /// original tree, so the default appearance never acquires a backdrop.
+  bool get _hasWallpaperSource =>
+      widget.wallpaperSelection.appearanceType != WallpaperType.none ||
+      widget.wallpaperSelection.photo != null;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     _scheduleImmersivePublish();
+    final content = _isImmersive
+        ? _buildImmersive(context, scheme)
+        : _buildStandard(context, scheme);
+    if (!_hasWallpaperSource) {
+      return SizedBox.expand(
+        child: ColoredBox(color: scheme.surface, child: content),
+      );
+    }
+    // The wallpaper sits between the fallback surface and the live UI. The
+    // backdrop is pointer- and semantics-transparent and paints its own scrim,
+    // so the readout and controls keep the theme's contrast. Actual Focus
+    // content has no opaque page background, so it never covers the wallpaper.
     return SizedBox.expand(
-      child: ColoredBox(
-        color: scheme.surface,
-        child: _isImmersive
-            ? _buildImmersive(context, scheme)
-            : _buildStandard(context, scheme),
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          ColoredBox(color: scheme.surface),
+          FocusWallpaperBackdrop(
+            key: FocusPage.wallpaperKey,
+            liveType: widget.wallpaperSelection.appearanceType,
+            photo: widget.wallpaperSelection.photo,
+            focal: widget.wallpaperSelection.focal,
+            location: widget.wallpaperLocation,
+            active: _engine.hasActiveSession,
+            reducedMotion: widget.reducedMotion ?? false,
+            lowPower: widget.lowPower,
+            overlay: true,
+          ),
+          content,
+        ],
       ),
     );
   }
@@ -899,29 +1054,23 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
                                 ),
                                 const SizedBox(height: 24),
                               ],
-                              _buildTime(
+                              _activeHero(
                                 context,
                                 scheme,
-                                _engine.remaining,
-                                'Time remaining '
-                                '${_spokenDuration(_engine.remaining)}',
+                                isBreak: false,
+                                semanticsLabel:
+                                    'Time remaining '
+                                    '${_spokenDuration(_engine.remaining)}',
+                                hint: _engine.isPaused
+                                    ? 'Paused. Continue when you are ready.'
+                                    : 'Focus in progress. Keep going.',
+                                gap: 12,
+                                hintMaxWidth: 280,
                               ),
-                              const SizedBox(height: 12),
-                              ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxWidth: 280,
-                                ),
-                                child: Text(
-                                  _engine.isPaused
-                                      ? 'Paused. Continue when you are ready.'
-                                      : 'Focus in progress. Keep going.',
-                                  textAlign: TextAlign.center,
-                                  style: theme.textTheme.bodyMedium?.copyWith(
-                                    color: scheme.onSurfaceVariant,
-                                    height: 1.4,
-                                  ),
-                                ),
-                              ),
+                              if (_engine.isPaused) ...[
+                                const SizedBox(height: 12),
+                                _runNameField(scheme, enabled: !locked),
+                              ],
                             ],
                           ),
                         ),
@@ -1035,22 +1184,17 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
       return [
         _statusLine(theme, scheme),
         const SizedBox(height: 8),
-        _buildTime(
+        _activeHero(
           context,
           scheme,
-          _engine.remaining,
-          'Break time remaining ${_spokenDuration(_engine.remaining)}',
-        ),
-        const SizedBox(height: 8),
-        Text(
-          _engine.isPaused
+          isBreak: true,
+          semanticsLabel:
+              'Break time remaining ${_spokenDuration(_engine.remaining)}',
+          hint: _engine.isPaused
               ? 'Paused. Continue when you are ready.'
               : 'Rest your eyes. This is break time.',
-          textAlign: TextAlign.center,
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-            height: 1.4,
-          ),
+          gap: 8,
+          hintMaxWidth: 420,
         ),
       ];
     }
@@ -1076,7 +1220,7 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
   }) {
     final settings = _activeSettings;
     return [
-      _buildSetupTime(context, scheme),
+      ..._setupHero(context, scheme, settings: settings, locked: locked),
       const SizedBox(height: 14),
       _configGrid(scheme, settings, enabled: !locked),
       const SizedBox(height: 12),
@@ -1094,8 +1238,107 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
     ];
   }
 
-  Widget _buildSetupTime(BuildContext context, ColorScheme scheme) {
+  /// The setup identity: the timer, run name and plan estimate.
+  ///
+  /// The plain default returns exactly the original three-part stack. Any other
+  /// layout or card choice groups the same controls in its own frame, so the
+  /// numbers, field and Start action never change.
+  List<Widget> _setupHero(
+    BuildContext context,
+    ColorScheme scheme, {
+    required FocusSettings settings,
+    required bool locked,
+  }) {
+    final name = _runNameField(scheme, enabled: !locked);
+    final preview = FocusPlanPreview(
+      key: FocusPage.planPreviewKey,
+      settings: settings,
+      doneAt: _engine.now.add(focusPlanTotal(settings)),
+      autoAdvance: _plan.autoAdvance,
+    );
+
+    if (_layout == HomeLayout.classic && !_appliesCard) {
+      return [
+        _buildSetupTime(context, scheme),
+        const SizedBox(height: 10),
+        name,
+        const SizedBox(height: 8),
+        preview,
+      ];
+    }
+
+    final hero = switch (_layout) {
+      HomeLayout.classic => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildSetupTime(context, scheme),
+          const SizedBox(height: 10),
+          name,
+          const SizedBox(height: 8),
+          preview,
+        ],
+      ),
+      HomeLayout.refined => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _ring(scheme, _buildSetupTime(context, scheme, stacked: true)),
+          const SizedBox(height: 16),
+          name,
+          const SizedBox(height: 8),
+          preview,
+        ],
+      ),
+      HomeLayout.studio => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _dial(scheme, _buildSetupTime(context, scheme, stacked: true)),
+          const SizedBox(height: 14),
+          name,
+          const SizedBox(height: 10),
+          _dockStrip(scheme, preview),
+        ],
+      ),
+    };
+    return [
+      _cardFrame(
+        hero,
+        isBreak: false,
+        borderRadius: switch (_layout) {
+          HomeLayout.classic => 24.0,
+          HomeLayout.refined => 28.0,
+          HomeLayout.studio => 20.0,
+        },
+      ),
+    ];
+  }
+
+  Widget _buildSetupTime(
+    BuildContext context,
+    ColorScheme scheme, {
+    bool stacked = false,
+  }) {
     final theme = Theme.of(context);
+    final status = Text(
+      _engine.statusLabel,
+      style: theme.textTheme.bodyMedium?.copyWith(
+        color: scheme.onSurfaceVariant,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+    final time = Text(
+      _formatDuration(_engine.remaining),
+      key: FocusPage.timeKey,
+      style: theme.textTheme.headlineMedium?.copyWith(
+        color: scheme.onSurface,
+        fontWeight: FontWeight.w700,
+        height: 1,
+        letterSpacing: -0.5,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
     return Semantics(
       key: FocusPage.timeSemanticsKey,
       container: true,
@@ -1103,33 +1346,342 @@ class _FocusPageState extends State<FocusPage> with WidgetsBindingObserver {
           '${_engine.statusLabel}. Focus timer '
           '${_spokenDuration(_engine.remaining)}',
       child: ExcludeSemantics(
-        child: Wrap(
-          alignment: WrapAlignment.center,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 10,
-          runSpacing: 2,
-          children: [
-            Text(
-              _engine.statusLabel,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
+        child: stacked
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  status,
+                  const SizedBox(height: 6),
+                  FittedBox(fit: BoxFit.scaleDown, child: time),
+                ],
+              )
+            : Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 10,
+                runSpacing: 2,
+                children: [status, time],
               ),
-            ),
-            Text(
-              _formatDuration(_engine.remaining),
-              key: FocusPage.timeKey,
-              style: theme.textTheme.headlineMedium?.copyWith(
-                color: scheme.onSurface,
-                fontWeight: FontWeight.w700,
-                height: 1,
-                letterSpacing: -0.5,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
+      ),
+    );
+  }
+
+  Widget _runNameField(ColorScheme scheme, {required bool enabled}) {
+    final theme = Theme.of(context);
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: TextField(
+          key: FocusPage.runNameFieldKey,
+          controller: _name,
+          enabled: enabled,
+          inputFormatters: const [
+            _Utf16LengthLimitingFormatter(FocusSnapshot.maxLabelLength),
           ],
+          textInputAction: TextInputAction.done,
+          onChanged: (value) => _engine.rename(value),
+          onSubmitted: (_) => _persist(),
+          onTapOutside: (_) {
+            _persist();
+            FocusScope.of(context).unfocus();
+          },
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: 'Name this run (optional)',
+            hintStyle: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+            prefixIcon: Icon(
+              Icons.edit_outlined,
+              size: 17,
+              color: scheme.onSurfaceVariant,
+            ),
+            prefixIconConstraints: const BoxConstraints(
+              minWidth: 36,
+              minHeight: 36,
+            ),
+            contentPadding: const EdgeInsets.fromLTRB(0, 10, 12, 10),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: scheme.outlineVariant),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: scheme.outlineVariant),
+            ),
+          ),
         ),
       ),
+    );
+  }
+
+  int get _timelineTarget {
+    final target = _engine.planTarget;
+    if (target > 0) return target;
+    final configured = _engine.planSettings.sessionsPerCycle;
+    return configured < 1 ? 1 : configured;
+  }
+
+  Widget _buildPlanTimeline() {
+    final target = _timelineTarget;
+    final completed = _engine.planCompleted < 0
+        ? 0
+        : (_engine.planCompleted > target ? target : _engine.planCompleted);
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: FocusPlanTimeline(
+          key: FocusPage.timelineKey,
+          target: target,
+          completed: completed,
+          phase: _engine.phase,
+          settings: _engine.planSettings,
+          active: _engine.hasActiveSession,
+          paused: _engine.isPaused,
+        ),
+      ),
+    );
+  }
+
+  /// The saved home layout for the Focus surfaces.
+  HomeLayout get _layout => widget.appearance.homeLayout;
+
+  /// A card style or effect only appears when the user moved away from the
+  /// quiet default, so classic + filled + off keeps the original composition
+  /// and never adds a card.
+  bool get _appliesCard =>
+      widget.appearance.cardStyle != FocusCardStyle.filled ||
+      widget.appearance.cardEffect != FocusCardEffect.off;
+
+  /// Consumed time over the block's intended duration, the same convention the
+  /// Clock countdown uses for its dial. Null when the engine cannot derive a
+  /// real fraction, so setup and an empty plan never paint a hand.
+  double? get _dialProgress {
+    if (!_engine.hasActiveSession) return null;
+    final total = _engine.intended.inMicroseconds;
+    if (total <= 0) return null;
+    return _engine.elapsed.inMicroseconds / total;
+  }
+
+  bool get _showsWatchDial =>
+      widget.appearance.watchDial && _dialProgress != null;
+
+  /// Wraps the exact digital readout in the shared watch face when the
+  /// preference is on and a real progress fraction exists. The readout widget
+  /// itself is never replaced or abbreviated.
+  Widget _watchReadout(Widget readout) {
+    final progress = _dialProgress;
+    if (!widget.appearance.watchDial || progress == null) return readout;
+    return Center(
+      child: WatchTimerDial(
+        key: FocusPage.watchDialKey,
+        progress: progress,
+        child: readout,
+      ),
+    );
+  }
+
+  Widget _cardFrame(
+    Widget child, {
+    required bool isBreak,
+    double borderRadius = 24,
+  }) {
+    if (!_appliesCard) return child;
+    return FocusCardSurface(
+      key: FocusPage.cardSurfaceKey,
+      appearance: widget.appearance,
+      progress: _dialProgress ?? 0,
+      isBreak: isBreak,
+      running: _engine.isRunning,
+      reducedMotion: widget.reducedMotion,
+      lowPower: widget.lowPower,
+      borderRadius: borderRadius,
+      child: child,
+    );
+  }
+
+  /// Scales fixed-width face content down instead of clipping it, so large
+  /// text and a long label still fit inside a circle.
+  Widget _circleContent(Widget child) {
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      child: SizedBox(width: 180, child: child),
+    );
+  }
+
+  /// The Refined layout's ring: one quiet outline around the timer.
+  Widget _ring(ColorScheme scheme, Widget child) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 236),
+        child: AspectRatio(
+          aspectRatio: 1,
+          child: DecoratedBox(
+            key: FocusPage.refinedRingKey,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: scheme.outlineVariant, width: 2),
+              gradient: RadialGradient(
+                colors: <Color>[
+                  scheme.primary.withValues(alpha: 0.08),
+                  scheme.surface.withValues(alpha: 0),
+                ],
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: _circleContent(child),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The Studio layout's dial face.
+  Widget _dial(ColorScheme scheme, Widget child) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 240),
+        child: AspectRatio(
+          aspectRatio: 1,
+          child: DecoratedBox(
+            key: FocusPage.studioDialKey,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: scheme.surfaceContainerLow,
+              border: Border.all(
+                color: scheme.primary.withValues(alpha: 0.35),
+                width: 2,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: _circleContent(child),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The Studio layout's dock strip: the plan readout sits in one soft band.
+  Widget _dockStrip(ColorScheme scheme, Widget child) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: child,
+      ),
+    );
+  }
+
+  /// The active session identity shared by the Focus and break surfaces.
+  ///
+  /// Every layout keeps the same exact readout and plan timeline; only the
+  /// frame and grouping change. The default classic surface returns the
+  /// original stack untouched, and the watch face replaces the readout in
+  /// place when the preference is on, so no numeric text is ever rebuilt.
+  Widget _activeHero(
+    BuildContext context,
+    ColorScheme scheme, {
+    required bool isBreak,
+    required String semanticsLabel,
+    required String hint,
+    required double gap,
+    required double hintMaxWidth,
+  }) {
+    final theme = Theme.of(context);
+    final readout = _buildTime(
+      context,
+      scheme,
+      _engine.remaining,
+      semanticsLabel,
+    );
+    final note = ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: hintMaxWidth),
+      child: Text(
+        hint,
+        textAlign: TextAlign.center,
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: scheme.onSurfaceVariant,
+          height: 1.4,
+        ),
+      ),
+    );
+    final timeline = _buildPlanTimeline();
+    final time = _watchReadout(readout);
+
+    if (_layout == HomeLayout.classic && !_appliesCard) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          time,
+          SizedBox(height: gap),
+          note,
+          const SizedBox(height: 16),
+          timeline,
+        ],
+      );
+    }
+
+    final hero = switch (_layout) {
+      HomeLayout.classic => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          time,
+          SizedBox(height: gap),
+          note,
+          const SizedBox(height: 16),
+          timeline,
+        ],
+      ),
+      HomeLayout.refined => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_showsWatchDial) ...[
+            time,
+            const SizedBox(height: 12),
+            note,
+          ] else
+            _ring(
+              scheme,
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [readout, const SizedBox(height: 8), note],
+              ),
+            ),
+          const SizedBox(height: 16),
+          timeline,
+        ],
+      ),
+      HomeLayout.studio => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _showsWatchDial ? time : _dial(scheme, readout),
+          const SizedBox(height: 12),
+          _dockStrip(
+            scheme,
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [note, const SizedBox(height: 10), timeline],
+            ),
+          ),
+        ],
+      ),
+    };
+
+    return _cardFrame(
+      hero,
+      isBreak: isBreak,
+      borderRadius: _layout == HomeLayout.refined ? 28.0 : 20.0,
     );
   }
 
@@ -2624,6 +3176,44 @@ class _PresetManagerSheetState extends State<_PresetManagerSheet> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Caps a run name at the same UTF-16 length `SessionDetails` accepts.
+///
+/// `TextField.maxLength` counts grapheme clusters, so a name made of emoji
+/// could pass the field and then be discarded later as too long. This measures
+/// the stored length instead and stops on a grapheme boundary, so no valid
+/// character is split.
+class _Utf16LengthLimitingFormatter extends TextInputFormatter {
+  const _Utf16LengthLimitingFormatter(this.limit);
+
+  final int limit;
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final text = newValue.text;
+    if (text.length <= limit) return newValue;
+    final buffer = StringBuffer();
+    var used = 0;
+    for (final cluster in text.characters) {
+      if (used + cluster.length > limit) break;
+      buffer.write(cluster);
+      used += cluster.length;
+    }
+    final clipped = buffer.toString();
+    final offset = newValue.selection.baseOffset;
+    return TextEditingValue(
+      text: clipped,
+      selection: TextSelection.collapsed(
+        offset: offset < 0
+            ? clipped.length
+            : (offset > clipped.length ? clipped.length : offset),
       ),
     );
   }

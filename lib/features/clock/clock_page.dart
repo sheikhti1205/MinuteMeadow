@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../design/companion_theme.dart';
+import '../../design/watch_timer_dial.dart';
 import 'clock_engine.dart';
 import 'clock_format.dart';
 
@@ -29,6 +30,7 @@ class ClockPage extends StatefulWidget {
     this.monotonicNow,
     this.processToken,
     this.resumeClock,
+    this.watchDial = false,
     super.key,
   });
 
@@ -69,7 +71,15 @@ class ClockPage extends StatefulWidget {
   final String? processToken;
   final Future<void> Function()? resumeClock;
 
+  /// Whether the visible measurement draws the shared [WatchTimerDial] behind
+  /// the exact digital readout.
+  ///
+  /// The default is the existing digital layout. The dial is opt-in and never
+  /// replaces the readout, the actions, the presets or the laps.
+  final bool watchDial;
+
   static const timeKey = Key('clock-time');
+  static const watchDialKey = Key('clock-watch-dial');
   static const primaryActionKey = Key('clock-primary-action');
   static const resetActionKey = Key('clock-reset');
   static const lapActionKey = Key('clock-lap');
@@ -435,6 +445,24 @@ class _ClockPageState extends State<ClockPage> with WidgetsBindingObserver {
     return formatClock(_engine.remaining);
   }
 
+  /// Normalized progress for the visible watch dial, or `null` when the
+  /// engine cannot derive a real fraction.
+  ///
+  /// The stopwatch repeats one revolution each minute. The countdown completes
+  /// one revolution over its duration, so the hand advances with consumed time
+  /// instead of unwinding.
+  double? get _watchDialProgress {
+    if (_isCountdown) {
+      final total = _engine.countdownMicros;
+      if (total <= 0) {
+        return null;
+      }
+      return _engine.countdownElapsed.inMicroseconds / total;
+    }
+    return (_engine.elapsed.inMicroseconds % Duration.microsecondsPerMinute) /
+        Duration.microsecondsPerMinute;
+  }
+
   String get _primaryLabel {
     if (_engine.isRunning) {
       return 'Pause';
@@ -584,10 +612,25 @@ class _ClockPageState extends State<ClockPage> with WidgetsBindingObserver {
     );
   }
 
+  Widget _buildReadout(ThemeData theme, double fontSize) {
+    return Text(
+      _displayTime,
+      key: ClockPage.timeKey,
+      maxLines: 1,
+      textAlign: TextAlign.center,
+      style: theme.textTheme.displayLarge?.copyWith(
+        fontSize: fontSize,
+        height: 1,
+        color: theme.colorScheme.onSurface,
+      ),
+    );
+  }
+
   Widget _buildHeroCard(ThemeData theme) {
     final colors = theme.colorScheme;
     final hasLaps = !_isCountdown && _engine.laps.isNotEmpty;
     final readoutSize = hasLaps ? 44.0 : 64.0;
+    final dialProgress = _watchDialProgress;
 
     return Container(
       decoration: BoxDecoration(
@@ -640,23 +683,22 @@ class _ClockPageState extends State<ClockPage> with WidgetsBindingObserver {
             ],
           ),
           const SizedBox(height: 6),
-          SizedBox(
-            height: 64,
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Text(
-                _displayTime,
-                key: ClockPage.timeKey,
-                maxLines: 1,
-                textAlign: TextAlign.center,
-                style: theme.textTheme.displayLarge?.copyWith(
-                  fontSize: readoutSize,
-                  height: 1,
-                  color: colors.onSurface,
-                ),
+          if (widget.watchDial && dialProgress != null)
+            Center(
+              child: WatchTimerDial(
+                key: ClockPage.watchDialKey,
+                progress: dialProgress,
+                child: _buildReadout(theme, readoutSize),
+              ),
+            )
+          else
+            SizedBox(
+              height: 64,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: _buildReadout(theme, readoutSize),
               ),
             ),
-          ),
           const SizedBox(height: 6),
           Text(
             _statusLabel,

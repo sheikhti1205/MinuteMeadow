@@ -1,11 +1,33 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/branding.dart';
+import '../../core/storage/backup_file_transport.dart';
 import '../../core/storage/data_backup.dart';
+import '../../design/appearance_preferences.dart';
+import '../focus/ambience/ambience.dart';
+import '../focus/background/focus_wallpaper.dart';
 import 'app_settings.dart';
+import 'focus_ambience_page.dart';
+import 'home_cards_page.dart';
+import 'portable_backup_dialogs.dart';
+import 'theme_colors_page.dart';
+import 'wallpaper_page.dart';
+
+/// Host answer for a Settings alert preview.
+///
+/// [ok] is false when the request reached the host but could not be honoured,
+/// so the page can re-check the Android permission state. [message] is the
+/// user-facing result and never contains a private path.
+typedef SettingsAlertPreview = Future<({bool ok, String message})> Function({
+  required bool sound,
+  required bool vibration,
+});
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -16,8 +38,21 @@ class SettingsPage extends StatefulWidget {
     required this.onClear,
     this.notificationsAvailable = false,
     this.checkNotificationPermission,
+    this.requestNotificationPermission,
+    this.checkExactAlarmPermission,
+    this.onRequestExactAlarmPermission,
+    this.onOpenNotificationSettings,
+    this.onSendTestAlert,
+    this.onPreviewCompletionChime,
+    this.alertNotice,
+    this.readPresetCounts,
+    this.onBuildBackup,
+    this.fileTransport,
     this.animationLab,
     this.developmentPacks,
+    this.wallpaperSelection,
+    this.wallpaperLocation = WallpaperLocation.both,
+    this.onApplyWallpaper,
     super.key,
   });
 
@@ -30,12 +65,60 @@ class SettingsPage extends StatefulWidget {
 
   /// Optional host hook for the current Android notification permission.
   ///
-  /// Saving still owns requesting access; this only reports existing state so
+  /// Saving still owns the user's intent; this only reports existing state so
   /// the page never claims a permission it cannot verify.
   final Future<bool> Function()? checkNotificationPermission;
 
+  /// Requests the Android notification permission.
+  ///
+  /// Only the contextual opt-in below calls this. A generic save never asks.
+  final Future<bool> Function()? requestNotificationPermission;
+
+  /// Reports whether exact alarms may be used on this device.
+  final Future<bool> Function()? checkExactAlarmPermission;
+
+  /// Opens the system exact-alarm grant page.
+  final Future<bool> Function()? onRequestExactAlarmPermission;
+
+  /// Opens this app's notification settings page.
+  final Future<bool> Function()? onOpenNotificationSettings;
+
+  /// Posts a real test notification on the completion channel.
+  final SettingsAlertPreview? onSendTestAlert;
+
+  /// Plays the real completion chime through the native host.
+  final SettingsAlertPreview? onPreviewCompletionChime;
+
+  /// The host's report of the last blocked, inexact or failed alert.
+  final ValueListenable<String?>? alertNotice;
+
+  /// Counts the saved presets a file save could include, or null when unknown.
+  final Future<({int focus, int clock})?> Function()? readPresetCounts;
+
+  /// Builds the exact backup document a file save writes.
+  final Future<DataBackup> Function({required bool includePresets})?
+  onBuildBackup;
+
+  /// File transport for saving and restoring a backup document.
+  ///
+  /// Null hides the file actions and keeps the copy/paste fallback only.
+  final BackupFileTransport? fileTransport;
+
   final WidgetBuilder? animationLab;
   final WidgetBuilder? developmentPacks;
+
+  /// The saved wallpaper source when the host owns the photo store.
+  ///
+  /// Null falls back to the built-in choice in [AppSettings.appearance]; this
+  /// page never reads local photo bytes itself.
+  final WallpaperSelection? wallpaperSelection;
+
+  /// Where the saved wallpaper appears, from the same stored choice.
+  final WallpaperLocation wallpaperLocation;
+
+  /// Commits a wallpaper draft. Null saves only the built-in choice through
+  /// [onSave]; a host that stores the local photo supplies this instead.
+  final Future<void> Function(WallpaperDraft draft)? onApplyWallpaper;
 
   static const focusDurationKey = ValueKey<String>('settings-focus-duration');
   static const shortBreakKey = ValueKey<String>('settings-short-break');
@@ -54,13 +137,14 @@ class _SettingsPageState extends State<SettingsPage>
   String? _error;
   Future<void> Function()? _retry;
   bool? _notificationsAllowed;
+  bool? _exactAlarmsAllowed;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     if (widget.notificationsAvailable) {
-      unawaited(_refreshNotificationPermission());
+      unawaited(_refreshAlertPermissions());
     }
   }
 
@@ -72,8 +156,10 @@ class _SettingsPageState extends State<SettingsPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from Android settings re-reads the real state instead of
+    // trusting the value from before the user left.
     if (state == AppLifecycleState.resumed && widget.notificationsAvailable) {
-      unawaited(_refreshNotificationPermission());
+      unawaited(_refreshAlertPermissions());
     }
   }
 
@@ -83,20 +169,36 @@ class _SettingsPageState extends State<SettingsPage>
     if (widget.notificationsAvailable &&
         (oldWidget.notificationsAvailable != widget.notificationsAvailable ||
             oldWidget.checkNotificationPermission !=
-                widget.checkNotificationPermission)) {
-      unawaited(_refreshNotificationPermission());
+                widget.checkNotificationPermission ||
+            oldWidget.checkExactAlarmPermission !=
+                widget.checkExactAlarmPermission)) {
+      unawaited(_refreshAlertPermissions());
     }
+  }
+
+  Future<void> _refreshAlertPermissions() async {
+    await _refreshNotificationPermission();
+    final check = widget.checkExactAlarmPermission;
+    if (check == null) return;
+    bool? allowed;
+    try {
+      allowed = await check();
+    } catch (_) {
+      allowed = null;
+    }
+    if (mounted) setState(() => _exactAlarmsAllowed = allowed);
   }
 
   Future<void> _refreshNotificationPermission() async {
     final check = widget.checkNotificationPermission;
     if (check == null) return;
+    bool? allowed;
     try {
-      final allowed = await check();
-      if (mounted) setState(() => _notificationsAllowed = allowed);
-    } on Exception {
-      if (mounted) setState(() => _notificationsAllowed = null);
+      allowed = await check();
+    } catch (_) {
+      allowed = null;
     }
+    if (mounted) setState(() => _notificationsAllowed = allowed);
   }
 
   Future<void> _run(
@@ -136,7 +238,7 @@ class _SettingsPageState extends State<SettingsPage>
   Future<void> _save(AppSettings next) => _run(
     () async {
       await widget.onSave(next);
-      await _refreshNotificationPermission();
+      await _refreshAlertPermissions();
     },
     failure: 'Could not save settings. Try again.',
   );
@@ -156,6 +258,147 @@ class _SettingsPageState extends State<SettingsPage>
     }
   }
 
+  /// Applies the user's completion-alert intent.
+  ///
+  /// Turning alerts on is the one direct opt-in: it shows a short explainer and
+  /// asks Android only if the user continues. `Not now` persists the off choice
+  /// and leaves every timer working. Turning alerts off never prompts.
+  Future<void> _toggleNotifications(AppSettings settings, bool value) async {
+    if (!value) {
+      await _save(settings.copyWith(notifications: false));
+      return;
+    }
+    final check = widget.checkNotificationPermission;
+    var allowed = _notificationsAllowed;
+    if (allowed != true && check != null) {
+      try {
+        allowed = await check();
+      } catch (_) {
+        allowed = null;
+      }
+      if (mounted) setState(() => _notificationsAllowed = allowed);
+    }
+    if (!mounted) return;
+    if (allowed == true) {
+      await _save(settings.copyWith(notifications: true));
+      return;
+    }
+    final request = widget.requestNotificationPermission;
+    if (request == null) {
+      // No permission bridge on this runner: keep the explicit intent.
+      await _save(settings.copyWith(notifications: true));
+      return;
+    }
+
+    final choice = await showDialog<_NotificationChoice>(
+      context: context,
+      builder: (context) => _NotificationPermissionDialog(
+        askedBefore: settings.notificationPromptSeen,
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == _NotificationChoice.notNow) {
+      await _save(settings.copyWith(
+        notifications: false,
+        notificationPromptSeen: true,
+      ));
+      _message('Alerts stay off. Timers keep working.');
+      return;
+    }
+
+    var granted = false;
+    try {
+      granted = await request();
+    } catch (_) {
+      granted = false;
+    }
+    if (!mounted) return;
+    // The stored value is the user's intent. Android may still deny the
+    // permission; the blocked state and its recovery row report that honestly.
+    await _save(settings.copyWith(
+      notifications: true,
+      notificationPromptSeen: true,
+    ));
+    if (!mounted) return;
+    if (granted) {
+      _message('Completion alerts are on.');
+    } else {
+      _message('Alerts need notification access in Android settings.');
+      await _refreshAlertPermissions();
+    }
+  }
+
+  Future<void> _openNotificationSettings() async {
+    final open = widget.onOpenNotificationSettings;
+    if (open == null) return;
+    try {
+      final opened = await open();
+      if (!mounted) return;
+      if (!opened) _message('Android notification settings did not open.');
+    } catch (_) {
+      if (mounted) _message('Android notification settings did not open.');
+    }
+  }
+
+  Future<void> _requestExactAlarms() async {
+    final request = widget.onRequestExactAlarmPermission;
+    if (request == null) return;
+    var granted = false;
+    try {
+      granted = await request();
+    } catch (_) {
+      granted = false;
+    }
+    if (!mounted) return;
+    if (!granted) {
+      _message('Exact-alarm access stays off. Alerts may arrive late.');
+    }
+    await _refreshAlertPermissions();
+  }
+
+  Future<void> _sendTestAlert(AppSettings settings) async {
+    final send = widget.onSendTestAlert;
+    if (send == null) return;
+    await _run(
+      () async {
+        final ({bool ok, String message}) result;
+        try {
+          result = await send(
+            sound: settings.sound,
+            vibration: settings.completionVibration,
+          );
+        } on Exception {
+          throw const FormatException('Could not send the test alert.');
+        }
+        if (!mounted) return;
+        _message(result.message);
+        if (!result.ok) await _refreshAlertPermissions();
+      },
+      failure: 'Could not send the test alert. Try again.',
+    );
+  }
+
+  Future<void> _previewCompletionChime(AppSettings settings) async {
+    final preview = widget.onPreviewCompletionChime;
+    if (preview == null) return;
+    await _run(
+      () async {
+        final ({bool ok, String message}) result;
+        try {
+          result = await preview(
+            sound: settings.sound,
+            vibration: settings.completionVibration,
+          );
+        } on Exception {
+          throw const FormatException('Could not play the completion chime.');
+        }
+        if (!mounted) return;
+        _message(result.message);
+      },
+      failure: 'Could not play the completion chime. Try again.',
+    );
+  }
+
   Future<void> _export() => _run(
     () async {
       final text = await widget.onExport();
@@ -173,8 +416,9 @@ class _SettingsPageState extends State<SettingsPage>
               const Text('The backup contains:'),
               const SizedBox(height: 10),
               if (backup != null)
-                _BackupSummary(
+                PortableBackupSummary(
                   backup: backup,
+                  willReplace: false,
                   note:
                       'This text includes your focus history, including any '
                       'session labels and notes. Keep it private. It does not '
@@ -234,6 +478,91 @@ class _SettingsPageState extends State<SettingsPage>
     );
   }
 
+  bool get _fileBackupAvailable =>
+      widget.onBuildBackup != null &&
+      widget.fileTransport != null &&
+      BackupFileTransport.isSupported;
+
+  Future<({int focus, int clock})?> _readPresetCounts() async {
+    final read = widget.readPresetCounts;
+    if (read == null) return null;
+    try {
+      return await read();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Saves a backup file with the saved presets as a default-off opt-in.
+  Future<void> _saveBackupFile() async {
+    final build = widget.onBuildBackup;
+    final transport = widget.fileTransport;
+    if (build == null || transport == null || !_fileBackupAvailable) return;
+    await _run(
+      () async {
+        final preview = await build(includePresets: false);
+        if (!mounted) return;
+        final counts = await _readPresetCounts();
+        if (!mounted) return;
+        final choice = await showPortableBackupExportDialog(
+          context,
+          sessionCount: preview.sessions.length,
+          focusPresetCount: counts?.focus,
+          clockPresetCount: counts?.clock,
+        );
+        if (choice == null || !mounted) return;
+        final backup = choice.includePresets
+            ? await build(includePresets: true)
+            : preview;
+        final text = backup.encode();
+        final saved = await _writeBackupFile(transport, text);
+        if (!mounted) return;
+        // A cancelled save never reports success.
+        _message(saved ? 'Backup saved.' : 'Backup not saved.');
+      },
+      failure: 'Could not save the backup file. Try again.',
+    );
+  }
+
+  Future<bool> _writeBackupFile(
+    BackupFileTransport transport,
+    String text,
+  ) async {
+    try {
+      return await transport.save(Uint8List.fromList(utf8.encode(text)));
+    } on BackupFileException catch (error) {
+      throw FormatException(error.message);
+    }
+  }
+
+  /// Picks a file, decodes it with the same byte path as copy/paste, and shows
+  /// the replacement preview before anything is committed.
+  Future<void> _restoreFromFile() async {
+    final transport = widget.fileTransport;
+    if (transport == null || !_fileBackupAvailable) return;
+    await _run(
+      () async {
+        final Uint8List? bytes;
+        try {
+          bytes = await transport.load();
+        } on BackupFileException catch (error) {
+          throw FormatException(error.message);
+        }
+        // An explicit cancellation changes nothing and reports nothing.
+        if (bytes == null || !mounted) return;
+        final backup = DataBackup.decodeBytes(bytes);
+        if (!mounted) return;
+        final restored = await showPortableBackupImportDialog(
+          context,
+          backup: backup,
+          onReplace: widget.onReplace,
+        );
+        if (restored == true) _message('Backup restored.');
+      },
+      failure: 'Could not restore the backup. Try again.',
+    );
+  }
+
   Future<void> _reset() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -266,6 +595,94 @@ class _SettingsPageState extends State<SettingsPage>
 
   void _open(WidgetBuilder builder) {
     Navigator.of(context).push<void>(MaterialPageRoute<void>(builder: builder));
+  }
+
+  /// Opens the theme editor. It merges against the newest stored settings when
+  /// Apply runs, and a null platform seed keeps System on the grayscale chrome
+  /// instead of inventing a hue.
+  void _openThemeColors(AppSettings settings) {
+    Navigator.of(context).push<void>(
+      ThemeColorsPage.route(
+        settings: settings,
+        onSave: widget.onSave,
+        latestSettings: () => widget.settings.value,
+      ),
+    );
+  }
+
+  /// Merges only the fields Home & Cards owns into the latest settings.
+  ///
+  /// The editor treats a thrown error as a failed save, so this awaits the real
+  /// store instead of the page's own error-reporting wrapper.
+  Future<void> _applyHomeCards(AppearancePreferences draft) async {
+    final latest = widget.settings.value;
+    await widget.onSave(
+      latest.copyWith(
+        appearance: latest.appearance.copyWith(
+          homeLayout: draft.homeLayout,
+          cardStyle: draft.cardStyle,
+          cardEffect: draft.cardEffect,
+          watchDial: draft.watchDial,
+        ),
+      ),
+    );
+  }
+
+  void _openHomeCards(AppSettings settings) => _open(
+    (_) => HomeCardsPage(
+      appearance: settings.appearance,
+      onApply: _applyHomeCards,
+      lowPower: settings.lowPower,
+      // Read the newest stored settings when the wallpaper opens, so a save
+      // made while this editor was open is not replaced by a stale copy.
+      onOpenWallpaper: () => _openWallpaper(widget.settings.value),
+    ),
+  );
+
+  void _openWallpaper(AppSettings settings) {
+    final selection =
+        widget.wallpaperSelection ??
+        WallpaperSelection.fromAppearance(settings.appearance.wallpaper);
+    _open(
+      (_) => WallpaperPage(
+        selection: selection,
+        location: widget.wallpaperLocation,
+        onApply: widget.onApplyWallpaper ?? _saveWallpaperChoice,
+        reducedMotion: settings.reducedMotion,
+        lowPower: settings.lowPower,
+      ),
+    );
+  }
+
+  /// Saves only the built-in wallpaper choice when no photo store is wired.
+  ///
+  /// The wallpaper editor keeps itself open when this throws, so the failure is
+  /// not swallowed here.
+  Future<void> _saveWallpaperChoice(WallpaperDraft draft) async {
+    final latest = widget.settings.value;
+    await widget.onSave(
+      latest.copyWith(
+        appearance: latest.appearance.copyWith(
+          wallpaper: draft.appearanceType,
+        ),
+      ),
+    );
+  }
+
+  void _openFocusAmbience(AppSettings settings) {
+    Navigator.of(context).push<void>(
+      FocusAmbiencePage.route(
+        preferences: settings.focusAmbience,
+        onSave: _saveFocusAmbience,
+      ),
+    );
+  }
+
+  /// Saves ambience into the newest settings so it never overwrites another
+  /// editor's change, and leaves Sound, notifications and haptics untouched.
+  Future<void> _saveFocusAmbience(FocusAmbiencePreferences next) async {
+    final latest = widget.settings.value;
+    await widget.onSave(latest.copyWith(focusAmbience: next));
   }
 
   Future<void> _showBuildDetails() async {
@@ -373,12 +790,74 @@ class _SettingsPageState extends State<SettingsPage>
                         value: settings.notifications,
                         onChanged: _busy
                             ? null
+                            : (value) =>
+                                  _toggleNotifications(settings, value),
+                      ),
+                      _SwitchRow(
+                        title: 'Completion vibration',
+                        subtitle:
+                            'Vibrate when a timer finishes. Separate from '
+                            'touch haptics.',
+                        value: settings.completionVibration,
+                        onChanged: _busy
+                            ? null
                             : (value) => _save(
-                                settings.copyWith(notifications: value),
+                                settings.copyWith(completionVibration: value),
                               ),
                       ),
+                      if (settings.notifications &&
+                          _notificationsAllowed == false)
+                        _SettingsRow(
+                          icon: Icons.open_in_new,
+                          title: 'Open notification settings',
+                          subtitle:
+                              'Allow MinuteMeadow alerts in Android settings.',
+                          enabled: !_busy,
+                          onTap: _busy ? null : _openNotificationSettings,
+                        ),
+                      if (settings.notifications &&
+                          _exactAlarmsAllowed == false)
+                        _SettingsRow(
+                          icon: Icons.alarm,
+                          title: 'Allow exact alarms',
+                          subtitle:
+                              'Without this, alerts may arrive a little late.',
+                          enabled: !_busy,
+                          onTap: _busy ? null : _requestExactAlarms,
+                        ),
+                      if (widget.onSendTestAlert != null)
+                        _SettingsRow(
+                          icon: Icons.notification_add_outlined,
+                          title: 'Send test alert',
+                          subtitle:
+                              'Post a notification like a finished timer.',
+                          enabled: !_busy,
+                          onTap: _busy
+                              ? null
+                              : () => _sendTestAlert(settings),
+                        ),
+                      if (widget.onPreviewCompletionChime != null)
+                        _SettingsRow(
+                          icon: Icons.music_note,
+                          title: 'Preview completion chime',
+                          subtitle: 'Play the sound a finished timer makes.',
+                          enabled: !_busy,
+                          onTap: _busy
+                              ? null
+                              : () => _previewCompletionChime(settings),
+                        ),
                     ],
                   ),
+                  if (widget.alertNotice case final notice?)
+                    ValueListenableBuilder<String?>(
+                      valueListenable: notice,
+                      builder: (context, text, _) => text == null
+                          ? const SizedBox.shrink()
+                          : Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: _AlertNotice(text),
+                            ),
+                    ),
                 ],
                 const _SectionHeader(
                   'Audio & haptics',
@@ -397,17 +876,43 @@ class _SettingsPageState extends State<SettingsPage>
                     ),
                     _SwitchRow(
                       title: 'Haptic feedback',
-                      subtitle: 'Vibration for timer events.',
+                      subtitle: 'Touch vibration for controls.',
                       value: settings.haptics,
                       onChanged: _busy
                           ? null
                           : (value) => _save(settings.copyWith(haptics: value)),
                     ),
+                    if (FocusAmbiencePlayer.isSupported)
+                      _SettingsRow(
+                        icon: Icons.graphic_eq,
+                        title: 'Focus ambience',
+                        subtitle:
+                            'Optional quiet sound while a focus session runs.',
+                        value: settings.focusAmbience.track.label,
+                        enabled: !_busy,
+                        onTap: _busy
+                            ? null
+                            : () => _openFocusAmbience(settings),
+                      ),
                   ],
                 ),
                 const _SectionHeader('Appearance', Icons.palette_outlined),
                 _SettingsGroup(
                   children: [
+                    _SettingsRow(
+                      icon: Icons.palette_outlined,
+                      title: 'Theme & Colors',
+                      subtitle: 'Palette, fonts, dark mode and AMOLED.',
+                      enabled: !_busy,
+                      onTap: _busy ? null : () => _openThemeColors(settings),
+                    ),
+                    _SettingsRow(
+                      icon: Icons.space_dashboard_outlined,
+                      title: 'Home & Cards',
+                      subtitle: 'Home layout, card style, motion and wallpaper.',
+                      enabled: !_busy,
+                      onTap: _busy ? null : () => _openHomeCards(settings),
+                    ),
                     _ThemeTile(
                       value: settings.themeMode,
                       enabled: !_busy,
@@ -452,10 +957,27 @@ class _SettingsPageState extends State<SettingsPage>
                     _SettingsRow(
                       icon: Icons.download,
                       title: 'Import backup',
-                      subtitle: 'Replace local data from a backup.',
+                      subtitle: 'Replace local data from pasted text.',
                       enabled: !_busy,
                       onTap: _busy ? null : _import,
                     ),
+                    if (_fileBackupAvailable) ...[
+                      _SettingsRow(
+                        icon: Icons.save_alt,
+                        title: 'Save backup file',
+                        subtitle:
+                            'Write a backup file. Saved presets are optional.',
+                        enabled: !_busy,
+                        onTap: _busy ? null : _saveBackupFile,
+                      ),
+                      _SettingsRow(
+                        icon: Icons.folder_open,
+                        title: 'Restore from file',
+                        subtitle: 'Choose a backup file and preview it first.',
+                        enabled: !_busy,
+                        onTap: _busy ? null : _restoreFromFile,
+                      ),
+                    ],
                     _SettingsRow(
                       icon: Icons.delete_outline,
                       title: 'Clear local data',
@@ -468,6 +990,20 @@ class _SettingsPageState extends State<SettingsPage>
                 const _SectionHeader('About', Icons.info_outline),
                 _SettingsGroup(
                   children: [
+                    _SettingsRow(
+                      icon: Icons.description_outlined,
+                      title: 'Licenses',
+                      subtitle: 'Open-source notices and attributions.',
+                      enabled: !_busy,
+                      onTap: _busy
+                          ? null
+                          : () => _open(
+                              (_) => LicensePage(
+                                applicationName: Branding.name,
+                                applicationVersion: Branding.displayVersion,
+                              ),
+                            ),
+                    ),
                     _AboutRow(onShowDetails: _showBuildDetails),
                   ],
                 ),
@@ -498,6 +1034,53 @@ class _SettingsPageState extends State<SettingsPage>
           },
         ),
       ),
+    );
+  }
+}
+
+enum _NotificationChoice { notNow, allow }
+
+/// Contextual explainer shown before the Android permission request.
+///
+/// It is only reachable from a direct opt-in. `Not now` dismisses without
+/// changing any timer and the caller persists that choice.
+class _NotificationPermissionDialog extends StatelessWidget {
+  const _NotificationPermissionDialog({required this.askedBefore});
+
+  final bool askedBefore;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('Turn on completion alerts?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'MinuteMeadow can alert you when a timer ends, even while the app '
+            'is closed. Android will ask for notification access next.',
+          ),
+          if (askedBefore) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'Alerts stayed off last time. Timers keep working either way.',
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () =>
+              Navigator.pop(context, _NotificationChoice.notNow),
+          child: const Text('Not now'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _NotificationChoice.allow),
+          child: const Text('Allow alerts'),
+        ),
+      ],
     );
   }
 }
@@ -1081,51 +1664,6 @@ String _buildSummary() {
   return 'Version ${Branding.version} · $build';
 }
 
-class _BackupSummary extends StatelessWidget {
-  const _BackupSummary({required this.backup, required this.note});
-
-  final DataBackup backup;
-  final String note;
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = backup.settings;
-    final count = backup.sessions.length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _SummaryLine(
-          icon: Icons.timer_outlined,
-          text:
-              '${settings.focusMinutes} min focus, '
-              '${settings.shortBreakMinutes} min short, '
-              '${settings.longBreakMinutes} min long',
-        ),
-        _SummaryLine(
-          icon: Icons.tune,
-          text:
-              'Feedback: notifications ${_onOff(settings.notifications)}, '
-              'sound ${_onOff(settings.sound)}, '
-              'haptics ${_onOff(settings.haptics)}',
-        ),
-        _SummaryLine(
-          icon: Icons.palette_outlined,
-          text:
-              'Appearance: ${_themeLabel(settings.themeMode)}, '
-              'reduced motion ${_onOff(settings.reducedMotion)}, '
-              'low power ${_onOff(settings.lowPower)}',
-        ),
-        _SummaryLine(
-          icon: Icons.history,
-          text: '$count focus ${count == 1 ? 'session' : 'sessions'}',
-        ),
-        const SizedBox(height: 2),
-        _Note(note),
-      ],
-    );
-  }
-}
-
 class _SummaryLine extends StatelessWidget {
   const _SummaryLine({required this.icon, required this.text});
 
@@ -1172,6 +1710,44 @@ class _Note extends StatelessWidget {
       text,
       style: theme.textTheme.bodySmall?.copyWith(
         color: theme.colorScheme.onSurfaceVariant,
+      ),
+    );
+  }
+}
+
+class _AlertNotice extends StatelessWidget {
+  const _AlertNotice(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline, size: 18, color: colors.onSurfaceVariant),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                text,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1280,8 +1856,6 @@ class _ErrorNotice extends StatelessWidget {
     );
   }
 }
-
-String _onOff(bool value) => value ? 'on' : 'off';
 
 class _DurationDialog extends StatefulWidget {
   const _DurationDialog(this.label, this.current, this.limit);
@@ -1481,11 +2055,10 @@ class _BackupDialogState extends State<_BackupDialog> {
             const SizedBox(height: 12),
             const Text('This backup will replace:'),
             const SizedBox(height: 8),
-            _BackupSummary(
+            PortableBackupSummary(
               backup: backup,
-              note:
-                  'This also clears active timers and laps. Saved Focus and '
-                  'Clock presets and installed companions stay on this device.',
+              willReplace: true,
+              note: _pasteNote(backup),
             ),
           ],
         ],
@@ -1504,6 +2077,18 @@ class _BackupDialogState extends State<_BackupDialog> {
       ],
     );
   }
+}
+
+/// Names the sections a pasted document preserves and replaces.
+String _pasteNote(DataBackup backup) {
+  final replacesPresets =
+      backup.focusPresets != null || backup.clockPresets != null;
+  return replacesPresets
+      ? 'This also clears active timers and laps. The preset sections named '
+            'above are replaced; omitted presets and installed companions stay '
+            'on this device.'
+      : 'This also clears active timers and laps. Saved Focus and Clock '
+            'presets and installed companions stay on this device.';
 }
 
 class _BuildDetailsDialog extends StatelessWidget {
@@ -1615,10 +2200,15 @@ class _ResetDialog extends StatelessWidget {
             icon: Icons.pets,
             text: 'Installed companions are removed.',
           ),
+          const _SummaryLine(
+            icon: Icons.photo_library_outlined,
+            text: 'The saved wallpaper photo is removed.',
+          ),
           const SizedBox(height: 4),
           const _Note(
             'This cannot be undone. A backup preserves preferences and '
-            'history only, not presets or companions.',
+            'history only, not presets or companions, and it never contains '
+            'the wallpaper photo.',
           ),
         ],
       ),

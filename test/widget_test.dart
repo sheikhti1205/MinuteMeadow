@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:companion_focus/app/app.dart';
 import 'package:companion_focus/app/bootstrap.dart';
@@ -9,9 +10,12 @@ import 'package:companion_focus/core/storage/data_backup.dart';
 import 'package:companion_focus/core/storage/local_database.dart';
 import 'package:companion_focus/core/storage/session_record.dart';
 import 'package:companion_focus/core/time/timer_checkpoint.dart';
+import 'package:companion_focus/design/appearance_preferences.dart';
 import 'package:companion_focus/features/clock/clock_engine.dart';
 import 'package:companion_focus/features/companion/companion_library.dart';
 import 'package:companion_focus/features/companion/companion_scope.dart';
+import 'package:companion_focus/features/focus/background/focus_wallpaper.dart';
+import 'package:companion_focus/features/focus/background/focus_wallpaper_store.dart';
 import 'package:companion_focus/features/focus/focus_page.dart';
 import 'package:companion_focus/features/insights/insights_page.dart';
 import 'package:companion_focus/features/settings/app_settings.dart';
@@ -282,7 +286,101 @@ void _mockBootClock() {
       );
 }
 
+/// Opens the copy/paste import dialog with [backup] already entered.
+Future<void> _openImportDialog(WidgetTester tester, String backup) async {
+  await _scrollSettingsTo(tester, find.text('Import backup'));
+  await tester.pump();
+  await tester.tap(find.text('Import backup'));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.enterText(
+    find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    ),
+    backup,
+  );
+  await tester.pump();
+  final restore = find.widgetWithText(FilledButton, 'Restore backup');
+  expect(tester.widget<FilledButton>(restore).onPressed, isNotNull);
+  expect(restore.hitTestable(), findsOneWidget);
+}
+
+/// Confirms the open import dialog and lets its route start closing.
+Future<void> _confirmImport(WidgetTester tester) async {
+  await tester.tap(find.widgetWithText(FilledButton, 'Restore backup'));
+  await tester.pump();
+}
+
+/// Returns the pushed Settings list to its top, where notices are rendered.
+///
+/// The failure notice is the first row of that list, and a lazily built list
+/// does not keep a row far above the viewport.
+Future<void> _scrollSettingsToTop(WidgetTester tester) async {
+  final scrollable = find.descendant(
+    of: find.byType(SettingsPage),
+    matching: find.byType(Scrollable),
+  );
+  tester.state<ScrollableState>(scrollable.first).position.jumpTo(0);
+  await tester.pump();
+  expect(find.text('Timer defaults'), findsOneWidget);
+}
+
+/// A deterministic saved session for restore and history assertions.
+SessionRecord _sessionRecord(String id, {int minutesAgo = 25}) {
+  final finish = DateTime.now().toUtc().subtract(Duration(minutes: minutesAgo));
+  return SessionRecord(
+    id: id,
+    startedAt: finish.subtract(const Duration(minutes: 25)),
+    finishedAt: finish,
+    intended: const Duration(minutes: 25),
+    actual: const Duration(minutes: 25),
+    completed: true,
+  );
+}
+
+/// A database whose next history read faults on demand.
+///
+/// A restore reads the rows it just wrote, so a fault there is the case that
+/// must not leave a failed-looking replacement behind or invite a second one.
+class _FlakyHistoryDatabase extends LocalDatabase {
+  _FlakyHistoryDatabase(super.executor);
+
+  bool failNextRead = false;
+
+  @override
+  Future<List<SessionRecord>> sessions() {
+    if (failNextRead) {
+      failNextRead = false;
+      return Future<List<SessionRecord>>.error(
+        Exception('The history read failed.'),
+      );
+    }
+    return super.sessions();
+  }
+}
+
 void main() {
+  test('a restore stores none only when a usable photo wins', () {
+    const imported = AppSettings(
+      appearance: AppearancePreferences(wallpaper: WallpaperType.embers),
+    );
+
+    final photoWins = restoredWallpaperSettings(imported, photoWins: true);
+    expect(photoWins.appearance.wallpaper, WallpaperType.none);
+    expect(photoWins.focusMinutes, imported.focusMinutes);
+    expect(photoWins.themeMode, imported.themeMode);
+
+    // Without a usable photo the imported live choice is kept untouched.
+    expect(
+      identical(
+        restoredWallpaperSettings(imported, photoWins: false),
+        imported,
+      ),
+      isTrue,
+    );
+  });
+
   testWidgets('opens the four destinations and returns from settings', (
     tester,
   ) async {
@@ -1061,6 +1159,137 @@ void main() {
     expect(restoredClock.laps, isEmpty);
     expect(restoredClock.isRunning, isFalse);
     expect(restoredClock.mode, ClockMode.countdown);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a restore that cannot read its commit leaves nothing behind', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final kept = _sessionRecord('kept-session');
+    final imported = _sessionRecord('imported-session', minutesAgo: 90);
+    final database = _FlakyHistoryDatabase(NativeDatabase.memory());
+    await tester.runAsync(() => database.record(kept));
+
+    await tester.pumpWidget(_app(database: database, sessions: [kept]));
+    await _frames(tester, 6);
+    await _openSettings(tester);
+
+    // What the device holds before the attempt, so the rollback is compared
+    // against it rather than against an assumption about the boot state.
+    final beforeSettings = await tester.runAsync(
+      () => database.readState('settings'),
+    );
+    final beforeRows = await tester.runAsync(() => database.sessions());
+
+    final backup = DataBackup(
+      settings: const AppSettings(focusMinutes: 30),
+      sessions: [imported],
+    ).encode();
+    await _openImportDialog(tester, backup);
+
+    // The replacement writes settings and history and then reads the rows it
+    // wrote. That read faults, so the replacement must not survive: a durable
+    // restore reported as failed invites the user to repeat it.
+    database.failNextRead = true;
+    await _confirmImport(tester);
+    await _scrollSettingsToTop(tester);
+    await _pumpUntil(
+      tester,
+      find.text('Could not restore the backup. Try again.'),
+    );
+    expect(
+      find.text('Could not restore the backup. Try again.'),
+      findsOneWidget,
+      reason: 'The fault is still reported, so the user is not told the '
+          'replacement succeeded.',
+    );
+    expect(find.text('Backup restored.'), findsNothing);
+
+    // Nothing was committed: the stored settings and history are the ones the
+    // device held before the attempt.
+    expect(
+      await tester.runAsync(() => database.readState('settings')),
+      beforeSettings,
+    );
+    final rows = await tester.runAsync(() => database.sessions());
+    expect(
+      [for (final row in rows!) row.id],
+      [for (final row in beforeRows!) row.id],
+    );
+
+    // The offered retry runs the same restore, and this time it commits once.
+    await tester.tap(find.text('Try again'));
+    await _pumpUntil(tester, find.text('Backup restored.'));
+    final after = await tester.runAsync(() => database.sessions());
+    expect([for (final row in after!) row.id], ['imported-session']);
+    final stored = await tester.runAsync(() => database.readState('settings'));
+    expect(AppSettings.decode(stored!).focusMinutes, 30);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a restore keeps an imported live wallpaper when no photo is usable', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final database = LocalDatabase(NativeDatabase.memory());
+    // The slot stores encoded bytes, so a row can exist that is not a usable
+    // photo. It must not take the imported live choice away, and a restore
+    // must never erase it either.
+    await tester.runAsync(() async {
+      final store = FocusWallpaperStore(database);
+      await store.write(
+        FocusWallpaperPhoto(bytes: Uint8List.fromList(<int>[1, 2, 3])),
+      );
+      await database.writeState('focus_wallpaper_location', 'active');
+    });
+
+    await tester.pumpWidget(_app(database: database));
+    await _frames(tester, 6);
+    await _openSettings(tester);
+
+    final backup = DataBackup(
+      settings: const AppSettings(
+        appearance: AppearancePreferences(wallpaper: WallpaperType.embers),
+      ),
+      sessions: const [],
+    ).encode();
+    await _openImportDialog(tester, backup);
+    await _confirmImport(tester);
+    await _pumpUntil(tester, find.text('Backup restored.'));
+
+    // Return to the shell so the restored wallpaper is read from the page the
+    // user actually sees, not from a route the Settings page covers.
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+
+    final page = tester.widget<FocusPage>(find.byType(FocusPage));
+    expect(page.wallpaperSelection.isPhoto, isFalse);
+    expect(page.wallpaperSelection.appearanceType, WallpaperType.embers);
+    expect(page.wallpaperLocation, WallpaperLocation.active);
+
+    final stored = await tester.runAsync(() => database.readState('settings'));
+    expect(
+      AppSettings.decode(stored!).appearance.wallpaper,
+      WallpaperType.embers,
+      reason: 'Only a usable local photo may replace the imported live '
+          'wallpaper with none.',
+    );
+    final kept = await tester.runAsync(
+      () => FocusWallpaperStore(database).read(),
+    );
+    expect(kept?.bytes, <int>[1, 2, 3]);
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

@@ -15,6 +15,19 @@ class LocalDatabase extends GeneratedDatabase {
   /// covering a whole delete in a handful of statements.
   static const _deleteBatchSize = 500;
 
+  /// Largest wallpaper photo the database accepts.
+  ///
+  /// The cap is enforced twice: the store rejects larger input before a
+  /// statement runs, and the table's `CHECK` constraint rejects an insert that
+  /// bypasses it. Only the encoded image is bounded; decoding and resizing are
+  /// renderer concerns. The value matches the renderer's
+  /// `FocusWallpaperLimits.maxEncodedBytes` so every accepted photo can be
+  /// saved, and it is the single storage-side source for that boundary.
+  static const focusWallpaperMaxBytes = 8 * 1024 * 1024;
+
+  /// The identifier of the single wallpaper slot.
+  static const focusWallpaperSlot = 'focus';
+
   factory LocalDatabase.open() => LocalDatabase(
     driftDatabase(
       name: 'companion_focus',
@@ -26,7 +39,7 @@ class LocalDatabase extends GeneratedDatabase {
   );
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   Iterable<TableInfo<Table, Object?>> get allTables => const [];
@@ -35,23 +48,31 @@ class LocalDatabase extends GeneratedDatabase {
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (_) => transaction(_createSchema),
     onUpgrade: (_, from, _) async {
-      // Schema 2 adds optional descriptive text. Existing rows keep their
-      // identifiers, timestamps and recorded durations; the new columns are
-      // null until a person edits them.
-      //
       // Drift runs `onUpgrade` outside a transaction (verified against
-      // drift 2.35.4 `GeneratedDatabase.beforeOpen`), so both statements are
-      // grouped here: either the database gains both columns or neither.
-      if (from < 2) {
-        await transaction(() async {
+      // drift 2.35.4 `GeneratedDatabase.beforeOpen`), so every gated step is
+      // wrapped in one transaction here. A failure in a later step rolls back
+      // the earlier ones, the stored version stays unchanged, and a retry
+      // repeats the whole upgrade instead of hitting columns that were
+      // already committed.
+      await transaction(() async {
+        // Schema 2 adds optional descriptive text. Existing rows keep their
+        // identifiers, timestamps and recorded durations; the new columns
+        // are null until a person edits them.
+        if (from < 2) {
           await customStatement(
             'ALTER TABLE focus_sessions ADD COLUMN label TEXT',
           );
           await customStatement(
             'ALTER TABLE focus_sessions ADD COLUMN note TEXT',
           );
-        });
-      }
+        }
+        // Schema 3 adds the single-slot local wallpaper photo. The step is
+        // additive: saved history, settings and companion packs keep their
+        // existing tables and columns.
+        if (from < 3) {
+          await _createWallpaperTable();
+        }
+      });
     },
   );
 
@@ -76,6 +97,29 @@ class LocalDatabase extends GeneratedDatabase {
     ''');
     await customStatement('''
       CREATE INDEX focus_sessions_finished ON focus_sessions(finished_at)
+    ''');
+    await _createWallpaperTable();
+  }
+
+  /// Creates the one-row wallpaper table used from schema 3 onwards.
+  ///
+  /// Alignment, strength and placement are separate columns so each can be
+  /// adjusted without rewriting the photo, and the byte cap is part of the
+  /// table so a manual insert cannot exceed it.
+  Future<void> _createWallpaperTable() async {
+    await customStatement('''
+      CREATE TABLE focus_wallpaper (
+        id TEXT PRIMARY KEY NOT NULL CHECK (id = '$focusWallpaperSlot'),
+        placement TEXT NOT NULL
+          CHECK (placement IN ('cover', 'contain', 'tile')),
+        alignment_x REAL NOT NULL
+          CHECK (alignment_x >= -1.0 AND alignment_x <= 1.0),
+        alignment_y REAL NOT NULL
+          CHECK (alignment_y >= -1.0 AND alignment_y <= 1.0),
+        strength INTEGER NOT NULL CHECK (strength BETWEEN 0 AND 100),
+        bytes BLOB NOT NULL
+          CHECK (length(bytes) BETWEEN 1 AND $focusWallpaperMaxBytes)
+      )
     ''');
   }
 
@@ -193,6 +237,11 @@ class LocalDatabase extends GeneratedDatabase {
     });
   }
 
+  /// Replaces the restored settings and history in one transaction.
+  ///
+  /// A normal restore keeps the locally chosen wallpaper, which is device
+  /// media rather than backup data. The full reset ([clearPacks]) removes the
+  /// saved timers, companion packs and wallpaper together.
   Future<void> replaceData(
     String settings,
     List<SessionRecord> importedSessions, {
@@ -200,6 +249,7 @@ class LocalDatabase extends GeneratedDatabase {
   }) => transaction(() async {
     if (clearPacks) {
       await customStatement('DELETE FROM app_state');
+      await customStatement('DELETE FROM focus_wallpaper');
     } else {
       await customStatement(
         "DELETE FROM app_state WHERE name IN ('focus', 'clock', 'settings')",

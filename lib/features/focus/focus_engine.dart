@@ -538,9 +538,11 @@ class FocusOutcome {
 ///
 /// Version 2 adds an optional [plan] document (presets, one-off plan,
 /// auto-advance). Version 3 adds the active plan's finite target, its progress
-/// and the settings it started with. Version 1 and 2 snapshots still decode;
-/// a legacy snapshot without plan fields never carries lifetime focus counts
-/// into the new plan progress, so no phantom blocks appear after an upgrade.
+/// and the settings it started with, plus an optional descriptive [label] that
+/// never changes a recorded duration or outcome. Version 1 and 2 snapshots
+/// still decode; a legacy snapshot without plan fields never carries lifetime
+/// focus counts into the new plan progress, so no phantom blocks appear after
+/// an upgrade.
 class FocusSnapshot {
   const FocusSnapshot({
     required this.id,
@@ -558,12 +560,17 @@ class FocusSnapshot {
     this.planCompleted = 0,
     this.planSettings,
     this.breakSkipped = false,
+    this.label,
   });
 
   static const _version = 3;
   static const _readableVersions = <int>{1, 2, 3};
   static const _maxIntendedMs = 24 * 60 * 60 * 1000;
   static const _maxCompletedSessions = 1000000;
+
+  /// The longest run label a snapshot keeps, in UTF-16 code units like
+  /// `SessionDetails.maxLabelLength`.
+  static const maxLabelLength = 80;
 
   final String id;
   final FocusPhase phase;
@@ -593,6 +600,10 @@ class FocusSnapshot {
   /// True when the last break was skipped rather than run to completion.
   final bool breakSkipped;
 
+  /// Optional descriptive name for the current run. It is metadata only: it
+  /// never changes the timer, its durations, or the outcome.
+  final String? label;
+
   String encode({FocusPreset? selectedPreset, FocusPlanState? plan}) =>
       jsonEncode(<String, Object?>{
         'version': _version,
@@ -613,6 +624,7 @@ class FocusSnapshot {
         if (planSettings case final settings?)
           'planSettings': settings.toJson(),
         if (planTarget != null) 'breakSkipped': breakSkipped,
+        if (label case final value?) 'label': value,
       });
 
   static FocusSnapshot? tryDecode(String? source) {
@@ -717,6 +729,8 @@ class FocusSnapshot {
       breakSkipped = false;
     }
 
+    final label = _runLabelFrom(decoded['label']);
+
     return FocusSnapshot(
       id: id,
       phase: phase,
@@ -733,6 +747,7 @@ class FocusSnapshot {
       planCompleted: planCompleted,
       planSettings: planSettings,
       breakSkipped: breakSkipped,
+      label: label,
     );
   }
 
@@ -758,6 +773,20 @@ class FocusSnapshot {
 
   static Duration? _durationFromMillis(Object? value) =>
       value is int && value >= 0 ? Duration(milliseconds: value) : null;
+}
+
+/// Trims a stored run label and treats blank text as absent, the same rule
+/// session details use. The length limit counts UTF-16 code units; the run-name
+/// field enforces the same limit while typing, so text a person entered is not
+/// dropped here. Oversized stored text is absent rather than an error, because
+/// a descriptive field must never make a saved timer fail to decode.
+String? _runLabelFrom(Object? value) {
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  if (trimmed.isEmpty || trimmed.length > FocusSnapshot.maxLabelLength) {
+    return null;
+  }
+  return trimmed;
 }
 
 /// Injectable time source. `monotonic` drives the running timer so a wall-clock
@@ -822,6 +851,7 @@ class FocusEngine {
   int _planCompleted = 0;
   FocusSettings? _planSettings;
   bool _breakSkipped = false;
+  String? _label;
 
   FocusStatus get status => _status;
   FocusPhase get phase => _phase;
@@ -836,12 +866,33 @@ class FocusEngine {
   bool get hasPlan => _planTarget > 0;
   int get planTarget => _planTarget;
   int get planCompleted => _planCompleted;
+
+  /// The settings the running plan uses for its blocks, captured at its start
+  /// and kept current when the settings change mid-plan.
+  FocusSettings get planSettings => _planSettings ?? _settings;
+
   bool get planFinished => hasPlan && _planCompleted >= _planTarget;
   bool get breakSkipped => _breakSkipped;
   FocusOutcome? get lastOutcome => _lastOutcome;
   bool get isRunning => _status == FocusStatus.running;
   bool get isPaused => _status == FocusStatus.paused;
   bool get hasActiveSession => isRunning || isPaused;
+
+  /// The optional descriptive name of the current run.
+  String? get label => _label;
+
+  /// The engine clock's wall time, shared with the page's finish estimate so a
+  /// fake clock in a test or a restored boot clock drives both.
+  DateTime get now => _clock.nowUtc();
+
+  /// Renames the run without touching its timer or outcome. A finished session
+  /// is recorded history, so its descriptive label stays as recorded.
+  void rename(String? value) {
+    if (_status == FocusStatus.completed || _status == FocusStatus.cancelled) {
+      return;
+    }
+    _label = _runLabelFrom(value);
+  }
 
   /// When the running session is due, for host scheduling. Null unless running.
   DateTime? get deadline => isRunning ? _clock.nowUtc().add(remaining) : null;
@@ -992,6 +1043,7 @@ class FocusEngine {
     _pausedRemaining = Duration.zero;
     _runStartedMono = _clock.monotonic();
     _lastOutcome = null;
+    _label = null;
   }
 
   /// Captures a fresh finite plan from the settings in force at its start.
@@ -1074,6 +1126,7 @@ class FocusEngine {
       planCompleted: _planCompleted,
       planSettings: _planSettings,
       breakSkipped: _breakSkipped,
+      label: _label,
     );
   }
 
@@ -1135,6 +1188,7 @@ class FocusEngine {
 
   void _restore(FocusSnapshot snapshot, DateTime? recoveredAt) {
     _completedFocusSessions = snapshot.completedFocusSessions;
+    _label = snapshot.label;
 
     switch (snapshot.status) {
       case FocusStatus.idle:
